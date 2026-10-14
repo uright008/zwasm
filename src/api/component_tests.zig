@@ -1514,7 +1514,7 @@ fn tcpEchoServerOnce(io: std.Io, server: *std.Io.net.Server) void {
     var reply_buf: [32]u8 = undefined;
     const reply = std.fmt.bufPrint(&reply_buf, "pong-{s}", .{buf[0..n]}) catch return;
     const data = [_][]const u8{reply};
-    _ = net_io.write(io, conn.socket.handle, data) catch return;
+    _ = net_io.writeVec(io, conn.socket.handle, &data) catch return;
 }
 
 test "ADR-0180: a real rust wasip2 TCP client connects + echoes through wasi:sockets" {
@@ -1565,7 +1565,7 @@ fn tcpClientOnce(io: std.Io, port: u16) void {
     } else return;
     defer stream.close(io);
     const data = [_][]const u8{"ping"};
-    _ = net_io.write(io, stream.socket.handle, data) catch return;
+    _ = net_io.writeVec(io, stream.socket.handle, &data) catch return;
     // Read until the guest's full "ping-ack" reply arrived (2 writes).
     var buf: [16]u8 = undefined;
     var total: usize = 0;

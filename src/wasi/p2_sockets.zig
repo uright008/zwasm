@@ -1074,7 +1074,7 @@ test "tcp client lifecycle: create → connect → echo against a loopback liste
 
     // server → client; readiness flips the client's POLL.IN pollable.
     const reply = [_][]const u8{"pong"};
-    _ = try net_io.write(io, conn.socket.handle, reply);
+    _ = try net_io.writeVec(io, conn.socket.handle, &reply);
     var attempts: u32 = 0;
     while (!(try client.ready(POLL_IN)) and attempts < 500) : (attempts += 1) {
         try io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake);

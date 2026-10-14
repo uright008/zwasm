@@ -499,8 +499,8 @@ test "populateDispatchTable is callable + no-op for current stubs" {
 }
 
 test "dispatcher returns a callable function value per IR-axis" {
-    inline for (@typeInfo(IRAxis).@"enum".field_names) |f| {
-        const axis: IRAxis = @enumFromInt(f.value);
+    inline for (@typeInfo(IRAxis).@"enum".field_values) |v| {
+        const axis: IRAxis = @enumFromInt(v);
         const fn_ref = dispatcher(axis);
         _ = fn_ref;
     }

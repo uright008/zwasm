@@ -49,7 +49,7 @@ pub fn TypedFunc(comptime Sig: type) type {
 fn resultCount(comptime Ret: type) comptime_int {
     if (Ret == void) return 0;
     return switch (@typeInfo(Ret)) {
-        .@"struct" => |s| s.fields.len,
+        .@"struct" => |s| s.field_names.len,
         else => 1,
     };
 }
@@ -71,8 +71,8 @@ fn marshalResult(comptime Ret: type, results: anytype) Ret {
     switch (@typeInfo(Ret)) {
         .@"struct" => |s| {
             var out: Ret = undefined;
-            inline for (s.fields, 0..) |f, i| {
-                @field(out, f.name) = valueToZig(f.type, results[i]);
+            inline for (s.field_names, s.field_types, 0..) |name, FT, i| {
+                @field(out, name) = valueToZig(FT, results[i]);
             }
             return out;
         },
