@@ -2080,7 +2080,7 @@ pub fn runWasiMain(engine: *Engine, alloc: Allocator, bytes: []const u8, host: *
     return runWasiP2MainBuilt(&built);
 }
 
-test "D-445 / #519: a guest-supplied invalid pollable handle traps, it does not abort the host" {
+test "D-445 / #519: a guest-supplied invalid pollable handle is a guest trap, not a host abort" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -2096,5 +2096,5 @@ test "D-445 / #519: a guest-supplied invalid pollable handle traps, it does not 
     var host = try wasi_host.Host.init(std.testing.allocator);
     defer host.deinit();
 
-    try std.testing.expectError(error.HostTrap, runWasiP2Main(&eng, std.testing.allocator, bytes, &host, .{}));
+    try std.testing.expectError(error.Unreachable, runWasiP2Main(&eng, std.testing.allocator, bytes, &host, .{}));
 }

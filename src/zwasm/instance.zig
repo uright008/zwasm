@@ -692,12 +692,29 @@ fn mapDispatchErr(err: anyerror) Instance.InvokeError {
         error.OutOfHeap => error.OutOfMemory,
         // preview1 `proc_exit` or p2/p3 `wasi:cli/exit` — a clean unwind (#490).
         error.ProcExit => error.ProcExit,
-        // A guest can hand us a handle, pointer or resource-table state that
-        // the trampolines surface as an error variant not listed above. That is
-        // a guest fault and must become a trap; aborting the host on guest input
-        // is never acceptable for an embedder running untrusted plugins. Real
-        // host bugs still degrade to a binding error (trap_surface.zig maps
-        // HostTrap), which is strictly better than killing the process.
+        // D-445: a guest that supplies a bad handle, a bad (ptr,len) or illegal
+        // drop/cancel sequencing is at fault, and the canonical guest trap is
+        // `error.Unreachable`. `mapAsyncFault` already narrows these for the
+        // async-builtin path; the sync trampolines reach this function instead,
+        // so the same names are narrowed here — one chokepoint rather than 59
+        // call sites. Table exhaustion counts as a guest fault (a guest can leak
+        // handles), which is why TableFull is in the list.
+        error.InvalidHandle,
+        error.TypeMismatch,
+        error.HandleStillBorrowed,
+        error.TableFull,
+        error.CopyInProgress,
+        error.NotCopying,
+        error.InvalidCallbackCode,
+        error.FutureDropBeforeWrite,
+        error.CopyNotIdle,
+        error.OutOfBounds,
+        => error.Unreachable,
+        // Anything else is not a guest fault we know how to attribute. It must
+        // still become a trap rather than killing the process — an embedder
+        // running untrusted plugins cannot have guest input abort the host —
+        // and trap_surface.zig maps HostTrap to a binding error, so real host
+        // bugs stay diagnosable instead of silent.
         else => return error.HostTrap,
     };
 }
