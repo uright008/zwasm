@@ -41,6 +41,13 @@ git rebase --onto upstream/<new-tag> 442f746a6 snooze/base   # 或按需 cherry-
 zig build && zig build test                                  # 见下
 ```
 
+**本机已验证（2026-10-14，`snooze/base` @ `be675e60d`）：**
+
+- `zig build`：通过（仅 spec-assert 目标因缺外部 `wasm-tools` 失败，非代码问题）。
+- 核心测试套件：**3268 passed / 12 skipped / 0 failed**。
+- 冒烟：`--version` 正常；`add(2,40)` 在 interp 与 JIT 下均为 42；`wasi_p2_hello.wasm` 输出 `hello`。
+- 进程存活：`invalid_pollable.wasm` → exit 1 + `HostTrap`；**红绿对照**已做（撤掉安全网则测试进程 SIGABRT）。
+
 回归基线（本机）：
 
 - `zig build`：需通过（唯一已知非代码失败是 spec-assert 目标缺外部 `wasm-tools`）。
