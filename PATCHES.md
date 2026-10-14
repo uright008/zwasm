@@ -2,7 +2,7 @@
 
 上游：<https://github.com/zwasm/zwasm>
 基线提交：`442f746a63c517d2545697aa174d9394f88086f7`（v2.7.0 之后、`#512` 修复）
-工作分支：`snooze/base`
+工作分支：`zig-0.18-port`（fork remote：`fork` = https://github.com/uright008/zwasm）
 工具链：Zig `0.18.0-dev.210+3626a240e`（上游要求 0.16；本 fork 已迁到 0.18-dev）
 
 本文件是 rebase 时的工作清单：每条补丁记录动机、上游 issue、以及上游若自行修复后如何降级。
@@ -15,6 +15,11 @@
 | p1 | `build: port build.zig to the Zig 0.18 std.Build API` | `standardOptimizeOption` 返回可选、`Optimize` 枚举字段改小写、`b.args` 移除、`b.pathFromRoot` → `addFileArg`/`addPrefixedFileArg`（47+5 处） | 上游仍要求 0.16 | 若上游迁 0.18 则整条删除；否则每次上游改动 build.zig 时手工 rebase |
 | p2 | `port: run the tree on Zig 0.18-dev` | 四类：`T ** N` → `@splat`/`++`；类型反射（`std.meta.fields`、`Type.Enum.fields`、`Type.Fn.params`）＋ 新增 `src/type_info_compat.zig`；`std.Io` 操作模型（`io.operate(.{ .net_read/.net_write })`）＋ 新增 `src/io_net_compat.zig`；杂项字面量/字段改名 | 同上 | 同上 |
 | p3 | `safety: guest faults trap instead of aborting the host (#519, #302 family)` | `mapDispatchErr` 的 `else` 由 `@panic` 改为 `error.HostTrap`；三个 mixed multi-result thunk 与 `invokeBufferWrite` 补 `ensureInstalled()` + `stack_limit`；新增回归 fixture 与测试 | **#519 / #302 仍 open** | 上游若修，删除对应部分；建议先把发现作为评论发到 issue（见下） |
+| p3b | `refactor: drop the reflection shim for the 0.18 idioms` | 删 `type_info_compat.zig`；用 `@typeInfo(E).@"enum".field_names` + `@field` 取代旧 `std.meta.fields` 视图 | 上游仍 0.16 | 随 p1/p2 一起上游化或删除 |
+| p3c | `refactor: use the 0.18 Io idioms for socket reads and writes` | 删 `io_net_compat.zig`；读用 `net.Stream.read(io, bufs)`，写用 `net.Stream.writer(io, buf)` + `writeAll` + `flush` | 同上 | 同上 |
+| p3d | `safety: attribute guest faults to the guest, not to the host binding` | `mapDispatchErr` 按 D-445 约定把 10 个 guest 致因错误窄化为 `error.Unreachable`（单一咽喉点，替代改 59 处调用点）；`HostTrap` 保留为兜底 | 与 #519 同类，可合并进该 issue 的评论 | 上游若实现自己的窄化，删除本条 |
+| p3e | `safety: two reachable aborts become typed errors` | `invokeFlat` 的 arity assert → `error.ArgArityMismatch`；`Table.set` 的 JIT funcref `@panic` → `error.UnsupportedFuncrefMirror` | 可上游（通用） | 上游若修，删除 |
+| p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | `STACK_GUARD_HEADROOM` 全平台统一 1 MiB；两个后端对超出 headroom 的帧 decline（解释器接管） | **#495 仍 open** | 上游若采用别的修法（信号分类/逐页探测），按新形状重写 |
 
 ## 尚未实施（后续批次）
 
@@ -41,12 +46,14 @@ git rebase --onto upstream/<new-tag> 442f746a6 snooze/base   # 或按需 cherry-
 zig build && zig build test                                  # 见下
 ```
 
-**本机已验证（2026-10-14，`snooze/base` @ `be675e60d`）：**
+**本机已验证（2026-10-14，`zig-0.18-port` @ `f8183217d`）：**
 
 - `zig build`：通过（仅 spec-assert 目标因缺外部 `wasm-tools` 失败，非代码问题）。
 - 核心测试套件：**3268 passed / 12 skipped / 0 failed**。
 - 冒烟：`--version` 正常；`add(2,40)` 在 interp 与 JIT 下均为 42；`wasi_p2_hello.wasm` 输出 `hello`。
-- 进程存活：`invalid_pollable.wasm` → exit 1 + `HostTrap`；**红绿对照**已做（撤掉安全网则测试进程 SIGABRT）。
+- 进程存活：`invalid_pollable.wasm` → exit 1 + `Unreachable`（规范 guest trap；撤掉安全网则测试进程 SIGABRT，红绿已验）。
+- 大帧：`recursive-large-frame.wasm` 在 `--engine jit` 下由 **exit 70（fatal signal）** 变为 `trap kind=stack_overflow`（exit 1）。
+- 真实负载未被误伤：ed25519 JIT 测试通过（16 KiB decline 阈值会把它打回解释器，故 headroom 抬到 1 MiB）。
 
 回归基线（本机）：
 
