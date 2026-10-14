@@ -24,7 +24,6 @@
 //! Zone 1 (`src/ir/`) — imports Zone 0 (`build_options`) + Zone 1.
 
 const std = @import("std");
-const type_info_compat = @import("../type_info_compat.zig");
 const build_options = @import("build_options");
 const zir = @import("zir.zig");
 

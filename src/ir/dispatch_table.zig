@@ -16,7 +16,6 @@
 //! Zone 1 — imports `ir/zir.zig` only.
 
 const std = @import("std");
-const type_info_compat = @import("../type_info_compat.zig");
 const zir = @import("zir.zig");
 
 pub const ZirOp = zir.ZirOp;

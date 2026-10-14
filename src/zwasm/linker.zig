@@ -18,7 +18,6 @@
 //! Both are caller obligations with no runtime guard.
 
 const std = @import("std");
-const type_info_compat = @import("../type_info_compat.zig");
 const Allocator = std.mem.Allocator;
 const dbg = @import("../support/dbg.zig");
 

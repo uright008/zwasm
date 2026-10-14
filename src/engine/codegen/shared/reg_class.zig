@@ -17,7 +17,6 @@
 //! Zone 2 (`src/engine/codegen/shared/`).
 
 const std = @import("std");
-const type_info_compat = @import("../../../type_info_compat.zig");
 
 const zir = @import("../../../ir/zir.zig");
 

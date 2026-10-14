@@ -28,7 +28,6 @@
 //! the planted fn-ptr (an opaque `usize`) crosses into Zone 2 setup.
 
 const std = @import("std");
-const type_info_compat = @import("../type_info_compat.zig");
 
 const jit_abi = @import("../engine/codegen/shared/jit_abi.zig");
 const handles = @import("handles.zig");
@@ -270,9 +269,10 @@ fn buildTable(comptime gen: anytype, comptime r: RetKind) Table(@TypeOf(gen(0, r
 /// Raw fn-ptr (as `usize`) for the all-GP arity-`N` thunk of result kind `r` at
 /// slot `idx`. `gen` is the per-arity GP thunk generator (t0..t4).
 fn ptrFor(comptime gen: anytype, r: RetKind, idx: usize) usize {
-    inline for (type_info_compat.enumFields(RetKind)) |rf| {
-        if (r == @field(RetKind, rf.name)) {
-            const tab = comptime buildTable(gen, @field(RetKind, rf.name));
+    inline for (@typeInfo(RetKind).@"enum".field_names) |name| {
+        const rc = @field(RetKind, name);
+        if (r == rc) {
+            const tab = comptime buildTable(gen, rc);
             return @intFromPtr(tab[idx]);
         }
     }
@@ -281,12 +281,12 @@ fn ptrFor(comptime gen: anytype, r: RetKind, idx: usize) usize {
 
 /// FP-path fn-ptr for a 1-arg thunk of arg-kind `k0` + result `r` at slot `idx`.
 fn fpPtr1(k0: Kind, r: RetKind, idx: usize) usize {
-    inline for (type_info_compat.enumFields(Kind)) |kf| {
-        if (k0 == @field(Kind, kf.name)) {
-            inline for (type_info_compat.enumFields(RetKind)) |rf| {
-                if (r == @field(RetKind, rf.name)) {
-                    const k0c = @field(Kind, kf.name);
-                    const rc = @field(RetKind, rf.name);
+    inline for (@typeInfo(Kind).@"enum".field_names) |k0_name| {
+        const k0c = @field(Kind, k0_name);
+        if (k0 == k0c) {
+            inline for (@typeInfo(RetKind).@"enum".field_names) |r_name| {
+                const rc = @field(RetKind, r_name);
+                if (r == rc) {
                     const tab = comptime blk: {
                         @setEvalBranchQuota(1_000_000);
                         var arr: [MAX_HOST_SLOTS]*const fn (*JitRuntime, PT(k0c)) callconv(.c) RT(rc) = undefined;
@@ -303,15 +303,15 @@ fn fpPtr1(k0: Kind, r: RetKind, idx: usize) usize {
 
 /// FP-path fn-ptr for a 2-arg thunk of arg-kinds `k0`,`k1` + result `r` at slot `idx`.
 fn fpPtr2(k0: Kind, k1: Kind, r: RetKind, idx: usize) usize {
-    inline for (type_info_compat.enumFields(Kind)) |kf0| {
-        if (k0 == @field(Kind, kf0.name)) {
-            inline for (type_info_compat.enumFields(Kind)) |kf1| {
-                if (k1 == @field(Kind, kf1.name)) {
-                    inline for (type_info_compat.enumFields(RetKind)) |rf| {
-                        if (r == @field(RetKind, rf.name)) {
-                            const k0c = @field(Kind, kf0.name);
-                            const k1c = @field(Kind, kf1.name);
-                            const rc = @field(RetKind, rf.name);
+    inline for (@typeInfo(Kind).@"enum".field_names) |k0_name| {
+        const k0c = @field(Kind, k0_name);
+        if (k0 == k0c) {
+            inline for (@typeInfo(Kind).@"enum".field_names) |k1_name| {
+                const k1c = @field(Kind, k1_name);
+                if (k1 == k1c) {
+                    inline for (@typeInfo(RetKind).@"enum".field_names) |r_name| {
+                        const rc = @field(RetKind, r_name);
+                        if (r == rc) {
                             const tab = comptime blk: {
                                 @setEvalBranchQuota(1_000_000);
                                 var arr: [MAX_HOST_SLOTS]*const fn (*JitRuntime, PT(k0c), PT(k1c)) callconv(.c) RT(rc) = undefined;

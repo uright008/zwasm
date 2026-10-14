@@ -15,7 +15,6 @@
 //! Zone 1 (`src/ir/`) — may import Zone 0 only. No upward imports.
 
 const std = @import("std");
-const type_info_compat = @import("../type_info_compat.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -999,8 +998,7 @@ test "ZirOp: tag count meets §4.2 baseline" {
     // + Phase 3-4 reserved + JIT pseudo-ops). Treat 250 as a
     // conservative floor — the assertion guards against a future
     // accidental deletion of a swath of tags.
-    const fields = type_info_compat.enumFields(ZirOp);
-    try std.testing.expect(fields.len >= 250);
+    try std.testing.expect(std.meta.fieldNames(ZirOp).len >= 250);
 }
 
 test "PassDiagnostics: empty default + deinit no-op + populated free" {
