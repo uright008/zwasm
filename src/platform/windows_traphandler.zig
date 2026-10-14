@@ -93,7 +93,7 @@ pub fn disarm() void {
 /// `error.Trap` from the entry shim. Returns `false` on clean
 /// success.
 ///
-/// **Must NOT be inlined** — `@returnAddress()` must point at
+/// **Must NOT be inlined ** — `@returnAddress()` must point at
 /// the caller's RIP after this function returns, and inline asm
 /// captures the helper's frame RSP. Marked `noinline` per
 /// ADR-0103 Consequences refinement.

@@ -8,7 +8,7 @@
 //!
 //! Why one shared file (vs per-arch alone, ADR-0112 Alt C):
 //! the byte emit calls differ between AAPCS64 (LDP X29,X30) and
-//! SysV (POP RBP), but the **invariant order** is identical —
+//! SysV (POP RBP), but the **invariant order ** is identical —
 //! SP-restore → callee-saved-restore → FP-pop, with NO RET.
 //! The safepoint-free invariant audit (ADR-0112 D7: no
 //! allocator / host-call / signal-check between teardown

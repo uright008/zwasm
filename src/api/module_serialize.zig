@@ -1,7 +1,7 @@
 //! `wasm_module_serialize` / `_deserialize` + the `WASM_DECLARE_SHARABLE_REF`
 //! share/obtain surface (wasm.h:412,422-423).
 //!
-//! **Byte-model** (ADR-0004 wasm-c-api; the serialized blob format is
+//! **Byte-model ** (ADR-0004 wasm-c-api; the serialized blob format is
 //! runtime-defined): zwasm's `Module` is a byte-holder (it keeps the original
 //! wasm bytes + re-compiles per instance), so the "serialized" form IS the wasm
 //! bytes — serialize = copy `module.bytes`, deserialize = `wasm_module_new`

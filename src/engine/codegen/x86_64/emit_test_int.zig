@@ -862,7 +862,7 @@ test "compile: function with 16 locals compiles (lifts the i8 cap)" {
     // Pre-7.10-g this surfaced UnsupportedOp[total_locals>15];
     // the disp32 form widening lifts the cap to ~268M slots.
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
-    const sixteen_locals = [_]zir.ValType{.i32} ** 16;
+    const sixteen_locals = @as([16]zir.ValType, @splat(.i32));
     var f = ZirFunc.init(0, sig, &sixteen_locals);
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .end });

@@ -112,7 +112,7 @@ pub fn initFromEnv(value: ?[]const u8) void {
 fn enabled(comptime mod: []const u8) bool {
     // Release builds skip the env read entirely — call sites
     // collapse to nothing.
-    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+    if (builtin.mode == .fast or builtin.mode == .small) {
         return false;
     }
     // Pre-init: dbg is a no-op (= release-equivalent default).
@@ -141,7 +141,7 @@ fn enabled(comptime mod: []const u8) bool {
 /// Print `fmt`-formatted output to stderr if `mod` is enabled by
 /// `ZWASM_DEBUG`. Comptime no-op in release builds.
 pub fn print(comptime mod: []const u8, comptime fmt: []const u8, args: anytype) void {
-    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+    if (builtin.mode == .fast or builtin.mode == .small) {
         return;
     }
     if (!enabled(mod)) return;
@@ -163,7 +163,7 @@ pub fn on(comptime mod: []const u8) bool {
 /// addresses into emitted code, which must never be serialized into a
 /// `.cwasm`. Comptime-false in release builds like `on`.
 pub fn anyActive() bool {
-    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+    if (builtin.mode == .fast or builtin.mode == .small) {
         return false;
     }
     if (!whitelist_initialised) return false;

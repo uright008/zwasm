@@ -177,13 +177,13 @@ pub const Runtime = struct {
     /// values) + the `memories` pointer array — mirrors
     /// `globals_storage` / `globals`.
     memory_storage: []MemoryInstance = &.{},
-    /// Module global slots. **Pointer-per-entry** so cross-module
+    /// Module global slots. **Pointer-per-entry ** so cross-module
     /// global imports alias the source instance's storage (per
     /// ADR-0014 §2.1 / 6.K.3). Defined globals point at slots in
     /// `globals_storage`; imported globals point at the source
     /// instance's slot. global.get / global.set dereference.
     globals: []*Value = &.{},
-    /// Owning storage for **defined** globals. Imported globals
+    /// Owning storage for **defined ** globals. Imported globals
     /// alias source storage and don't touch this slice. Arena-
     /// owned in the c_api path; tests construct in-place.
     globals_storage: []Value = &.{},

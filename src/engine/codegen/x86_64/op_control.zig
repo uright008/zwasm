@@ -116,7 +116,7 @@ const merge_top_vregs_cap: u8 = 8;
 /// D-147 / lesson `2026-05-18-parallel-move-cycle-in-if-merge.md`:
 /// x86_64 mirror of arm64's `resolveAndEmitMergeMovsRegBatch`.
 /// Resolves a batch of GPR register-to-register merge moves with
-/// cycle detection; breaks cycles via **RAX** (caller-saved return
+/// cycle detection; breaks cycles via **RAX ** (caller-saved return
 /// reg, outside both the regalloc pool and `abi.spill_stage_gprs`
 /// R10/R11 — safe scratch for the duration of the merge batch
 /// since no calls fire between MOVs). Algorithm + correctness
@@ -538,7 +538,7 @@ pub fn emitBr(
 /// Win64: ≤1 of each). Walks `func.sig.results` in order; per-
 /// class index maps the i-th result to the corresponding result
 /// register. Multi-result overflow surfaces as UnsupportedOp.
-/// **No parallel-move hazard** — allocatable_gprs / xmms exclude
+/// **No parallel-move hazard ** — allocatable_gprs / xmms exclude
 /// the result regs, so per-result MOV emit is safe.
 pub fn marshalReturnRegs(
     allocator: Allocator,
@@ -1044,7 +1044,7 @@ pub fn branchOnReg(
 /// recorded; the matching `else` patches it to else-body start,
 /// or the matching `end` patches it to end-of-if (no-else case).
 ///
-/// **Multi-result support** (D-035 chunk-d035-c): `arity` is the
+/// **Multi-result support ** (D-035 chunk-d035-c): `arity` is the
 /// blocktype's result count (= `ZirInstr.extra` per
 /// `lower.zig:openBlock`; Wasm 2.0 multi-value). The merge MOV
 /// path in emitElse / emitEndIntra captures N then-arm result

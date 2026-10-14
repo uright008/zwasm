@@ -17,6 +17,7 @@
 //! Zone 2 (`src/engine/codegen/shared/`).
 
 const std = @import("std");
+const type_info_compat = @import("../../../type_info_compat.zig");
 
 const zir = @import("../../../ir/zir.zig");
 
@@ -76,7 +77,7 @@ const info_table = [_]RegClassInfo{
 // the same compile, preventing the W54-class drift between
 // "class declared" and "class invariants known".
 comptime {
-    const named_count = @typeInfo(RegClass).@"enum".fields.len;
+    const named_count = @typeInfo(RegClass).@"enum".field_names.len;
     if (info_table.len != named_count) {
         @compileError("info_table length must match the number of named RegClass variants");
     }
@@ -100,7 +101,7 @@ pub fn info(class: RegClass) ?RegClassInfo {
 const testing = std.testing;
 
 test "info: every named RegClass variant resolves" {
-    inline for (@typeInfo(RegClass).@"enum".fields) |f| {
+    inline for (@typeInfo(RegClass).@"enum".field_names) |f| {
         const class: RegClass = @enumFromInt(f.value);
         const got = info(class) orelse {
             std.debug.print("missing info for variant {s}\n", .{f.name});
@@ -122,7 +123,7 @@ test "info: special-cache flag set exactly for the three *_special variants" {
 
 test "info: SIMD class is the only 128-bit width" {
     var simd_count: u8 = 0;
-    inline for (@typeInfo(RegClass).@"enum".fields) |f| {
+    inline for (@typeInfo(RegClass).@"enum".field_names) |f| {
         const got = info(@enumFromInt(f.value)).?;
         if (got.width_bits == 128) simd_count += 1;
     }

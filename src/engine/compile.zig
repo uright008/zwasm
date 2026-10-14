@@ -803,7 +803,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
 
     // §9.9 / 9.9-l-1b-d093-d78 (skip-impl drainage):
     // Wasm spec §3.4.6 / §3.4.7 — active elem/data segment
-    // **offset expressions** must be `i32`-typed constant
+    // **offset expressions ** must be `i32`-typed constant
     // expressions per §3.3.2. Drains `elem` + `data`
     // SKIP-VALIDATOR-GAP entries with "type mismatch",
     // "constant expression required", "unknown global" in

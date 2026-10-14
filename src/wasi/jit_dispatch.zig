@@ -846,7 +846,7 @@ test "fd_read: bad fd returns EBADF" {
 }
 
 test "fd_read: fd 0 stdin EOF writes 0 to nread and returns success" {
-    var memory: [32]u8 = .{0xAA} ** 32;
+    var memory: [32]u8 = @splat(0xAA);
     var rt: JitRuntime = .{
         .vm_base = &memory,
         .mem_limit = memory.len,

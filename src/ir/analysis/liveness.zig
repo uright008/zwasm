@@ -9,7 +9,7 @@
 //! that instr index too.
 //!
 //! Phase-5 scope is the **straight-line MVP arithmetic + locals
-//! + globals + select + conversions** subset (the ops covered by
+//! + globals + select + conversions ** subset (the ops covered by
 //! `src/interp/mvp_int.zig`, `mvp_float.zig`, and
 //! `mvp_conversions.zig` minus control flow). Encountering any
 //! control-flow op (`block` / `loop` / `if` / `else` / `br` /

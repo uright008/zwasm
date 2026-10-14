@@ -429,7 +429,7 @@ fn scalarToVal(r: @import("../engine/runner.zig").ScalarResult) wasm_c_api.Val {
 }
 
 /// `zwasm run <component.wasm>` (CM campaign D1-2 / D-306): run a WASI Preview 2
-/// **component** from the CLI. Routes a component-layer module (preamble version
+/// **component ** from the CLI. Routes a component-layer module (preamble version
 /// `0x0d`, layer 1) to the component host (`api/component.zig runWasiP2Main`),
 /// wiring real stdout via the WASI host (`io` set, no capture buffer → the
 /// trampolines' `fd.writeSlice` routes fd 1 to the process stdout). Returns the
@@ -532,7 +532,7 @@ pub fn runCwasmWasi(
 /// `invoke_name` overrides the entry-point selection (default
 /// `_start` → `main`, per `resolveDefaultEntry`). When non-null, the
 /// runner locates the func export with that exact name and calls
-/// it with **zero args** — this is the zero-arg wrapper; typed
+/// it with **zero args ** — this is the zero-arg wrapper; typed
 /// `--invoke NAME=a,b,...` arg marshalling + result printing live
 /// in `cli/invoke_args.zig` (D-273).
 pub fn runWasmCaptured(

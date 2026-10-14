@@ -27,13 +27,13 @@
 //!
 //! Declarative ABI tables + the
 //! `slotToReg` / `fpSlotToReg` mappers + the **single-
-//! reservation invariant model per ADR-0026** (R15 holds the
+//! reservation invariant model per ADR-0026 ** (R15 holds the
 //! saved runtime ptr; other JitRuntime invariants reload from
 //! [R15 + offset] at point of use).
 //!
 //! One load-bearing consumer remains intentionally deferred:
 //!
-//!   - **`spill_stage_gprs`** (mirrors arm64's X14/X15). Awaits
+//!   - **`spill_stage_gprs` ** (mirrors arm64's X14/X15). Awaits
 //!     the spill-aware emit port that mirrors arm64's sub-1c.
 //!
 //! Win64 ABI tables live alongside SysV in this file — see the
@@ -220,7 +220,7 @@ pub const allocatable_xmms = [_]Xmm{
 /// otherwise reserved AND ABI-portable (RAX/RDX = return; RCX =
 /// shift count + Win64 arg0; RDX/R8/R9 = args).
 ///
-/// **Two stage regs** (matching arm64's count) so binary ops can
+/// **Two stage regs ** (matching arm64's count) so binary ops can
 /// stage two spilled operands without collision (`stage_idx`
 /// 0 → R10, 1 → R11).
 pub const spill_stage_gprs = [_]Gpr{ .r10, .r11 };
@@ -342,7 +342,7 @@ pub const win64 = struct {
 
     /// Allocatable GPRs under Win64. Two more than SysV because
     /// RDI + RSI are callee-saved here (caller-saved on SysV).
-    /// **Order intentionally mirrors SysV for slots 0..5** so a
+    /// **Order intentionally mirrors SysV for slots 0..5 ** so a
     /// codegen pass that uses ≤ 6 slots produces identical
     /// register choices under both ABIs (lets Mac-host byte-
     /// level emit tests stay encoding-stable when the build

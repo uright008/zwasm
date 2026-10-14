@@ -10,7 +10,7 @@
 //!
 //! W54-class lesson made structural (per `textbook_survey.md`
 //! Guard 4 + ROADMAP §4.2 / P13): liveness drives regalloc, not
-//! the other way around. Liveness is a **const input** here;
+//! the other way around. Liveness is a **const input ** here;
 //! `verify` then asserts the post-condition (no two overlapping
 //! live ranges share a slot) before downstream emit ever sees
 //! the allocation. v1's W54 root cause was regalloc-stage IR
@@ -124,7 +124,7 @@ pub const Allocation = struct {
     /// vreg `v`. Length matches `func.liveness.?.ranges.len`.
     /// Slot ids are 0..n_slots-1 (no holes).
     ///
-    /// **Class interpretation is up to the caller.** The
+    /// **Class interpretation is up to the caller. ** The
     /// allocator is class-blind — a single contiguous slot id
     /// space spans every vreg. Per-class boundaries (this struct's
     /// `max_reg_slots_gpr` / `max_reg_slots_fp`) decide whether a

@@ -13,7 +13,7 @@
 //!   (Wasm `call N` / `call_indirect`) routes through
 //!   `funcptr_base[i]` = body address, preserving register
 //!   convention internally.
-//! - **Wrapper thunk** (this file): a JIT-emitted machine-
+//! - **Wrapper thunk ** (this file): a JIT-emitted machine-
 //!   code thunk per multi-result function. Zig-side
 //!   signature `fn(rt, results, args) callconv(.c) ErrCode`
 //!   — single u32 return, no hidden RCX pointer issue on
@@ -556,7 +556,7 @@ fn emitAarch64(allocator: std.mem.Allocator, params: EmitParams) Error!EmitOutpu
     try writeInsn(allocator, &bytes, 0xA9BF7BE1);
     // Precompute each param's load word + whether its dest is X2 (the args base).
     var load_words: [7]u32 = undefined;
-    var load_is_base: [7]bool = [_]bool{false} ** 7;
+    var load_is_base: [7]bool = @as([7]bool, @splat(false));
     {
         var gpr_n: u32 = 0;
         var fp_n: u32 = 0;

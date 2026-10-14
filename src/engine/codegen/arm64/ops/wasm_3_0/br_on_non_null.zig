@@ -15,14 +15,14 @@
 //! for br_on_non_null the label expects `k+1` (ref passed AS the
 //! topmost label value). So:
 //!
-//! - **Peek** ref vreg (don't pop yet) → merge_mov sees pushed_vregs
+//! - **Peek ** ref vreg (don't pop yet) → merge_mov sees pushed_vregs
 //!   with k+1 entries (matching label.result_arity == k+1).
 //! - `CMP Xn, #0` + `B.EQ skip_byte` (skip past merge+B on null).
 //! - `captureOrEmitBlockMergeMov(ctx, tgt_idx)` — places k+1 values
 //!   (including ref) at label positions.
 //! - `B 0` placeholder → append fixup to `labels[tgt_idx].pending`.
 //! - Patch `B.EQ` skip disp.
-//! - **Pop** ref from pushed_vregs (consumed on null fall-through; the
+//! - **Pop ** ref from pushed_vregs (consumed on null fall-through; the
 //!   peek meant we never popped, so pop now to reach fall-through
 //!   state with ref discarded).
 //!

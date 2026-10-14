@@ -749,7 +749,7 @@ pub fn emitSignExtend(
 ///   IDIV / DIV divisor           ; quotient → RAX, remainder → RDX
 ///   MOV   dst, EAX/RAX           ; or RDX/EDX for rem
 ///
-/// **Signed overflow** (`div_s` / `rem_s` only):
+/// **Signed overflow ** (`div_s` / `rem_s` only):
 /// Wasm spec §4.4.1.1 says `INT_MIN / -1` traps on `div_s` (the
 /// quotient `2^(N-1)` is unrepresentable) but `rem_s` returns
 /// `0` (`INT_MIN - INT_MIN*(-1)` wraps to 0). On x86_64, IDIV

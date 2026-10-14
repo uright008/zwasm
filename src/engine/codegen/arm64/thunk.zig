@@ -4,10 +4,10 @@
 //!
 //! Each thunk is a fixed-size native code snippet (`thunk_bytes`) that wraps
 //! a call-and-return around the callee's JIT entry, **saving the caller's
-//! reserved-invariant cohort** (`abi.reserved_invariant_gprs`: X19 and
+//! reserved-invariant cohort ** (`abi.reserved_invariant_gprs`: X19 and
 //! X23..X28, per ADR-0017 / ADR-0018 / ADR-0027) across the call so the
 //! importer's view survives the callee's prologue overwrite, **copying the
-//! importer's overflow (stack) arguments** into its own outgoing area so the
+//! importer's overflow (stack) arguments ** into its own outgoing area so the
 //! callee finds them at `[X29, #16 + …]` — directly above the frame of
 //! whoever BLR'd it, which is this thunk, not the importer (ADR-0228, #390) —
 //! and clearing + relaying the callee's trap fields (#381).
@@ -245,7 +245,7 @@ comptime {
 
 const testing = std.testing;
 
-const i32s = [_]zir.ValType{.i32} ** 12;
+const i32s = @as([12]zir.ValType, @splat(.i32));
 const one = [_]zir.ValType{.i32};
 const three = [_]zir.ValType{ .i32, .i32, .i32 };
 
@@ -346,8 +346,8 @@ test "emitThunk: encoding round-trip via helpers" {
 test "emitThunk: saves and restores every abi.reserved_invariant_gprs register, X23 included (#413)" {
     var buf: [thunk_bytes]u8 = undefined;
     emitThunk(&buf, 0, 0, sigOf(&.{}, &one));
-    var saved: [32]bool = .{false} ** 32;
-    var restored: [32]bool = .{false} ** 32;
+    var saved: [32]bool = @splat(false);
+    var restored: [32]bool = @splat(false);
     var i: usize = 0;
     while (i < n_insns) : (i += 1) {
         const w = wordAt(&buf, i);

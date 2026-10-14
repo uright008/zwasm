@@ -11,7 +11,7 @@
 //! regalloc → coalesce → emit) ends with `emit.compile()`
 //! returning `EmitOutput { bytes, n_slots, call_fixups }`.
 //! This module accepts the same per-func data as **input
-//! slices** (`bytes_per_func`, `n_slots_per_func`,
+//! slices ** (`bytes_per_func`, `n_slots_per_func`,
 //! `sig_idx_per_func`, `relocs`) — no direct dependency on
 //! `arm64/` or `x86_64/` per A12 + A3.
 //!
@@ -54,7 +54,7 @@ pub const Input = struct {
     sig_idx_per_func: []const u16,
     /// Reloc list across all functions. Each reloc's
     /// `code_offset` is interpreted relative to the
-    /// **per-func bytes** (not the concatenated code
+    /// **per-func bytes ** (not the concatenated code
     /// section); this module rebases them at write time.
     /// `func_idx_for_reloc[i]` names which func owns
     /// `relocs[i]`.

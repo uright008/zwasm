@@ -2,7 +2,7 @@
 //! equivalence for `call_indirect` checks.
 //!
 //! The spec (§4.4.10.1) requires the funcref's stored type to
-//! **match** the call_indirect's annotated type. "Match" =
+//! **match ** the call_indirect's annotated type. "Match" =
 //! structurally equivalent (same param + result valtype
 //! sequence), not nominal typeidx equality. A module may
 //! declare the same FuncType shape multiple times at different

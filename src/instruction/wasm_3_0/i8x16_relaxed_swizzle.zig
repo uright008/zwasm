@@ -2,7 +2,7 @@
 //! folded into Wasm 3.0). Spec §relaxed-simd (relaxed swizzle).
 //!
 //! Relaxed latitude: out-of-range index byte (≥16) yields an
-//! implementation-defined result. zwasm v2 pins it to **0** (uniform across
+//! implementation-defined result. zwasm v2 pins it to **0 ** (uniform across
 //! arches — arm64 TBL and the x86_64 PSHUFB OOB-correction both zero it), so
 //! the op is behaviourally identical to strict `i8x16.swizzle` and reuses its
 //! emit. See the 17.4 bundle determinism table.

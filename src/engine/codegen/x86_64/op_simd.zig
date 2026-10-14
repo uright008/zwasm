@@ -902,7 +902,7 @@ pub fn emitV128Bitselect(
 /// `x86_64/emit.zig`'s scalar `.select` arm).
 /// D-083 part 2 (mirror of arm64's part 1 fix).
 ///
-/// **Mask-based recipe** (x86_64 has no direct `CSETM` / `DUP`
+/// **Mask-based recipe ** (x86_64 has no direct `CSETM` / `DUP`
 /// equivalent, so synthesise the same all-bits mask via
 /// `SETcc`-then-broadcast):
 ///
@@ -920,7 +920,7 @@ pub fn emitV128Bitselect(
 ///   MOVAPS dst_xmm, val2_xmm    ; dst = val2 (self-MOV when dst==val2)
 ///   PXOR   dst_xmm, XMM14        ; dst = val2 ^ tmp = cond ? val1 : val2
 ///
-/// **SPILL-EXEMPT** (mirror of arm64 emitV128Select): result_v
+/// **SPILL-EXEMPT ** (mirror of arm64 emitV128Select): result_v
 /// resolves via `xmmDefSpilledV128(stage 0)`, val1 via
 /// `xmmLoadSpilledV128(stage 1)`, val2 via `resolveXmm` (rejects
 /// spilled with `Error.UnsupportedOp`). XMM14 (= fp spill stage

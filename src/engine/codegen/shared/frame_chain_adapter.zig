@@ -3,9 +3,9 @@
 //! (ADR-0114 D5/D6).
 //!
 //! The per-arch `frame_chain.zig` files return `RawFrameLink`
-//! with the saved return-address as an **absolute** address
+//! with the saved return-address as an **absolute ** address
 //! (`caller_lr` on AAPCS64 / `caller_rip` on SysV/Win64). The
-//! shared unwinder consumes a **module-relative** PC for
+//! shared unwinder consumes a **module-relative ** PC for
 //! `ExceptionTable.lookup`. This adapter holds the
 //! PC-normalization callback that translates absolute return
 //! address → module-relative PC via the active per-function

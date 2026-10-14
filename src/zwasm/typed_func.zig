@@ -30,9 +30,9 @@ pub fn TypedFunc(comptime Sig: type) type {
         const Self = @This();
 
         pub fn call(self: Self, args: ArgsT) _zwasm.Instance.InvokeError!Ret {
-            var arg_values: [fn_info.params.len]Value = undefined;
-            inline for (fn_info.params, 0..) |p, i| {
-                const PT = p.type orelse @compileError("TypedFunc: anytype params not supported");
+            var arg_values: [fn_info.param_types.len]Value = undefined;
+            inline for (fn_info.param_types, 0..) |p, i| {
+                const PT = p orelse @compileError("TypedFunc: anytype params not supported");
                 arg_values[i] = zigToValue(PT, args[i]);
             }
 

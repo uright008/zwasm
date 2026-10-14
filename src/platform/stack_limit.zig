@@ -216,7 +216,7 @@ fn computeLinux(headroom: usize) usize {
         if (rlimit >= b.high) return disabled;
         return b.high - rlimit + headroom;
     }
-    var attr: PthreadAttr = .{ ._opaque = [_]u8{0} ** 64 };
+    var attr: PthreadAttr = .{ ._opaque = @as([64]u8, @splat(0)) };
     if (pthread_getattr_np(std.c.pthread_self(), &attr) != 0) return disabled;
     defer _ = pthread_attr_destroy(&attr);
     var low_opt: ?*anyopaque = null;
@@ -265,7 +265,7 @@ pub fn nativeStackHigh() usize {
             const b = procStackBounds() orelse return 0;
             return b.high;
         }
-        var attr: PthreadAttr = .{ ._opaque = [_]u8{0} ** 64 };
+        var attr: PthreadAttr = .{ ._opaque = @as([64]u8, @splat(0)) };
         if (pthread_getattr_np(std.c.pthread_self(), &attr) != 0) return 0;
         defer _ = pthread_attr_destroy(&attr);
         var low_opt: ?*anyopaque = null;

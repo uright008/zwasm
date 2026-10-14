@@ -11,11 +11,11 @@
 //! `[]const ImportBinding` to `instantiate.instantiateRuntime`.
 //!
 //! Each variant carries:
-//!   - the **wiring data** the runtime needs (HostCall slot value,
+//!   - the **wiring data ** the runtime needs (HostCall slot value,
 //!     source TableInstance value, source memory slice, source
 //!     global slot pointer),
-//!   - both the **source's actual descriptor** AND the
-//!     **importer's expected descriptor** so the runtime-side
+//!   - both the **source's actual descriptor ** AND the
+//!     **importer's expected descriptor ** so the runtime-side
 //!     `checkImportTypeMatches` is a pure data compare with no
 //!     re-decoding of the source binary.
 //!

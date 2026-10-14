@@ -473,7 +473,7 @@ pub fn emitMemoryGrow(
 /// dead from prologue through every instruction up to the CALL
 /// itself, then comes alive holding the return value.
 ///
-/// **JitRuntime invariant access** per ADR-0026: each of
+/// **JitRuntime invariant access ** per ADR-0026: each of
 /// `table_size`, `typeidx_base`, `funcptr_base` reloads from
 /// `[R15 + offset]` at point of use rather than holding
 /// callee-saved slots. The cost (3 extra MOVs vs ARM64's

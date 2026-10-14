@@ -1509,7 +1509,7 @@ test "#216: an unsupported JIT call shape is reported NAMING the signature" {
     var inst = try mod.instantiate(.{ .engine = .jit });
     defer inst.deinit();
 
-    const args = [_]_zwasm.Value{.{ .i32 = 0 }} ** 17;
+    const args: [17]_zwasm.Value = @splat(.{ .i32 = 0 });
     try testing.expectError(error.UnsupportedEngineSignature, inst.invoke("f", &args, &.{}));
     try testing.expectEqual(@as(u32, 1), log.traps);
     try testing.expectEqual(@as(i32, 20), log.trap_kind); // ZWASM_TRAP_UNSUPPORTED

@@ -5,7 +5,7 @@
 //! `return_call` returned garbage, `return_call_indirect` trapped `oob_table`
 //! and `return_call_ref` died on a fatal signal.
 //!
-//! **The fixtures are convention-independent on purpose.** The register budget
+//! **The fixtures are convention-independent on purpose. ** The register budget
 //! differs per ABI — SysV x86_64 passes 5 user int args, Win64 3, AAPCS64 7 —
 //! so a test pinned at 6 params would assert something different on each CI
 //! leg. 8 overflow everywhere and 3 fit everywhere. The MEMORY-class case
@@ -101,7 +101,7 @@ const tail3_ok_wasm = [_]u8{
 // the stack (#424 review). One live vector, so the shape does not depend on
 // register-allocator pressure the way a nine-vector one does.
 //
-// **What a green here means, per leg.** On AAPCS64 the predicate is the only
+// **What a green here means, per leg. ** On AAPCS64 the predicate is the only
 // gate: the V pool holds thirteen, so nine live SIMD values need no spill and
 // the emit would otherwise marshal onto the released frame. On x86_64 SysV the
 // verdict is the same but the reason arrives earlier — six allocatable XMMs

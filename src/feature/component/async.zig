@@ -3,7 +3,7 @@
 //!
 //! Stackless callback-ABI model on zwasm's synchronous engine — NO fibers. This
 //! module is the Zone-1 pure-data core: the per-component stream/future **handle
-//! table** (the table Unit C's i32 ABI handles index into), the `CopyState`
+//! table ** (the table Unit C's i32 ABI handles index into), the `CopyState`
 //! machine, and the `ReturnCode` packing. The rendezvous copy logic, waitable
 //! sets, subtasks, and the callback event loop land in later chunks (β–η per
 //! ADR-0187); none of those import the engine — the Zone-3 host drives the loop.

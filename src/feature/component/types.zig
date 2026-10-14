@@ -1,5 +1,5 @@
 // FILE-SIZE-EXEMPT: verified P1 seam (section decode → types_decode.zig) SCHEDULED post-v2.5.0 as D-581 (triage 2026-08-12, per ADR-0099)
-//! Component **type model + type/import/export section decode** (CM campaign
+//! Component **type model + type/import/export section decode ** (CM campaign
 //! chunk A2; spec `component-model/design/mvp/Binary.md` §type / §import-export).
 //!
 //! Builds the component-level type index space from the `type` section (id 7)
@@ -402,7 +402,7 @@ pub const CoreInstance = union(enum) {
     inline_exports: []const CoreInlineExport,
 };
 
-/// One entry in the component's **core-func index space** (`Binary.md`: core
+/// One entry in the component's **core-func index space ** (`Binary.md`: core
 /// funcs are minted, in definition order, by `canon lower` / `canon
 /// resource.{new,drop,rep}` and by core-func `alias`es — NOT by `canon lift`,
 /// which mints a component func). Recording them in a single ordered list is
@@ -449,7 +449,7 @@ pub const AliasTarget = union(enum) {
     outer: struct { count: u32, index: u32 },
 };
 
-/// One entry in the component **func** index space (`Binary.md`: component
+/// One entry in the component **func ** index space (`Binary.md`: component
 /// funcs are minted, in definition order, by func `import`s, func `alias`es, and
 /// `canon lift`s — NOT by `canon lower`, which mints a CORE func). Recorded in
 /// section order so a `canon lower`'s `func` operand resolves to its origin (the
@@ -570,7 +570,7 @@ pub const ComponentInstanceDef = union(enum) {
 pub const TypeInfo = struct {
     arena: std.heap.ArenaAllocator,
     deftypes: std.ArrayList(DefType),
-    /// The TRUE size of the component **type index space** — minted (in
+    /// The TRUE size of the component **type index space ** — minted (in
     /// definition order) by `type`-section defs PLUS type-sort `alias`es, type
     /// `import`s, and type `export`s. `deftypes.len` alone counts only the type
     /// section, so a valid index pointing at an aliased/imported type would look
@@ -613,7 +613,7 @@ pub const TypeInfo = struct {
     /// The core-func index space in definition order (`CoreFuncDef`) — the
     /// authoritative map for resolving a core-func index to its definition.
     core_funcs: std.ArrayList(CoreFuncDef),
-    /// The core-**table** index space in definition order. Core tables enter the
+    /// The core-**table ** index space in definition order. Core tables enter the
     /// component-level index space only via `alias core export` (a core table is
     /// never minted by canon), so each entry is the alias target. Needed by the
     /// general instantiation engine (E2) to resolve a synthetic instance's table
@@ -667,7 +667,7 @@ pub const TypeInfo = struct {
         };
     }
 
-    /// Resolve a core-**table** index → the core-instance export it aliases
+    /// Resolve a core-**table ** index → the core-instance export it aliases
     /// (`{instance, name}`), or null if out of range / not a core-export alias.
     /// The general instantiation engine uses this to find which built instance
     /// owns a table a synthetic instance re-exports (the shim `$imports` table).
@@ -686,7 +686,7 @@ pub const TypeInfo = struct {
     /// unversioned import (matches every row).
     pub const ImportRef = struct { interface: []const u8, func: []const u8, gen: WasiGen = .any };
 
-    /// Resolve a component **func** index (a `canon lower`'s `func` operand) back
+    /// Resolve a component **func ** index (a `canon lower`'s `func` operand) back
     /// to the imported interface + func name it aliases — so the host classifies
     /// a lowered WASI import by its COMPONENT interface (`wasi/adapter`) instead
     /// of the core module's hand-chosen import names. The `@version` suffix is

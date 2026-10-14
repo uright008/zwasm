@@ -86,7 +86,7 @@ pub const HostFuncPayload = struct {
 /// internal `Value` cell into a `wasm_val_t` (tagged C union)
 /// without re-walking the module's globals section.
 ///
-/// **Storage lifetime** (per ADR-0110 Phase A.4g): the underlying
+/// **Storage lifetime ** (per ADR-0110 Phase A.4g): the underlying
 /// `*Value` cell lives in the owning Store's arena. A Global
 /// handle synthesised against an Instance's export can outlive
 /// that Instance as long as another live instance (zombie list)

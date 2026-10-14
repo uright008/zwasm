@@ -13,7 +13,7 @@
 //!
 //! Compile-time gate: `build_options.trace_ringbuffer` controls
 //! whether write functions execute meaningfully or fold to
-//! no-ops. Per ROADMAP §A12 the gate is **not** a runtime `if`
+//! no-ops. Per ROADMAP §A12 the gate is **not ** a runtime `if`
 //! in hot dispatch paths; it's a `comptime` branch consumed by
 //! every write site, so release builds with `-Dtrace-ringbuffer=
 //! false` (default) emit zero trace code.

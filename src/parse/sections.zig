@@ -2,7 +2,7 @@
 //! Wasm section-body decoders (type / function / code).
 //!
 //! Phase 1 / §9.1 / 1.9 lands these incrementally — this file
-//! starts with the **type section** decoder. The frontend parser
+//! starts with the **type section ** decoder. The frontend parser
 //! (1.4) hands a section's raw bytes (`Section.body`); each decoder
 //! here turns them into structured data the validator (1.5) +
 //! lowerer (1.6) can consume per function.
@@ -187,8 +187,8 @@ fn groupSpan(types: *const Types, i: u32) [2]u32 {
 /// Wasm 3.0 GC §3.3 — iso-recursive canonical EQUALITY of two defined
 /// types. Two types are equal iff they occupy the same POSITION in
 /// structurally-identical rec groups, where a member's concrete refs are
-/// compared **positionally** when they point inside the group (ref to
-/// "member k of this group") and **by canonical equality** when they
+/// compared **positionally ** when they point inside the group (ref to
+/// "member k of this group") and **by canonical equality ** when they
 /// point outside it. This intra-vs-inter distinction is what separates,
 /// e.g., `(rec $f (struct (field (ref $f))))` (self-recursive) from
 /// `(rec $g (struct (field (ref $other))))` (external ref) even when the

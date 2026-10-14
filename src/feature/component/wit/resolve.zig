@@ -1,4 +1,4 @@
-//! WIT **resolver** (CM campaign chunk A4; spec `component-model/design/mvp/WIT.md`).
+//! WIT **resolver ** (CM campaign chunk A4; spec `component-model/design/mvp/WIT.md`).
 //!
 //! Takes the parsed `Ast` and binds its name references into a resolved model
 //! — the input the canonical ABI (B-chunks) consumes. For the primitive

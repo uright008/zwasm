@@ -39,7 +39,7 @@ pub const ValType = extern struct {
 };
 
 /// `wasm_valtype_vec_t` — `WASM_DECLARE_VEC(valtype, *)`: a pointer-vec of
-/// owned `wasm_valtype_t*`. C-ABI `{ size_t size; wasm_valtype_t** data; }`.
+/// owned `wasm_valtype_t*`. C-ABI `{ size_t size; wasm_valtype_t ** data; }`.
 pub const ValTypeVec = extern struct {
     size: usize,
     data: ?[*]?*ValType,

@@ -403,7 +403,7 @@ fn emitFpAbsNeg(allocator: Allocator, buf: *std.ArrayList(u8), dst: inst.Xmm, sr
 /// Returns i32 0/1 boolean per Wasm spec; NaN comparisons return
 /// 0 (eq/lt/gt/le/ge) or 1 (ne) — the "unordered" case.
 ///
-/// **Strategy** — UCOMISS/UCOMISD set ZF/CF/PF; we drive SETcc:
+/// **Strategy ** — UCOMISS/UCOMISD set ZF/CF/PF; we drive SETcc:
 /// - lt / le: swap operands, then SETA / SETAE. Since SETA/AE
 ///   require CF=0, NaN (CF=1) returns 0 cleanly.
 /// - gt / ge: no swap; SETA / SETAE.

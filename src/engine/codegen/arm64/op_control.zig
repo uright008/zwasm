@@ -544,7 +544,7 @@ pub fn emitBrTable(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
 /// recorded. The skip resolves at matching `else` (to else-body
 /// start) or `end` (to end-of-if).
 ///
-/// **Multi-result support** (D-035): `ins.extra`
+/// **Multi-result support ** (D-035): `ins.extra`
 /// carries the blocktype result arity per `lower.zig:openBlock`
 /// (Wasm 2.0 multi-value). The merge MOV path in emitElse /
 /// emitEndIntra captures N then-arm result vregs at `else` and

@@ -47,7 +47,7 @@ test "JIT struct.new_default reaches jitGcAlloc via the rt field, not a baked ad
 }
 
 fn helperSlotDefault(comptime field_name: []const u8) @FieldType(jit_abi.JitRuntime, field_name) {
-    inline for (std.meta.fields(jit_abi.JitRuntime)) |f| {
+    inline for (@typeInfo(jit_abi.JitRuntime).@"struct".fields) |f| {
         if (comptime std.mem.eql(u8, f.name, field_name)) {
             const dv: *const @FieldType(jit_abi.JitRuntime, field_name) =
                 @ptrCast(@alignCast(f.default_value_ptr.?));

@@ -5,7 +5,7 @@
 //! user to guess which construct in the module it was (#424). This slot
 //! carries the missing half: the op, and the callee shape that refused it.
 //!
-//! **Why not `diagnostic.setDiag`.** That channel is the reason a run FAILED,
+//! **Why not `diagnostic.setDiag`. ** That channel is the reason a run FAILED,
 //! and a decline is not one — under `.auto` the interpreter runs the module
 //! and the process exits 0, so a diagnostic set here would stand in the slot
 //! for whatever the interpreter reported next (`cli/run.zig` keeps that slot

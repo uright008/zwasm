@@ -270,7 +270,7 @@ fn writeEvent(mem: []u8, off: usize, userdata: u64, ty: p1.EventType, nbytes: u6
 /// clock path covers the scheduler-park case (Go/wasi-libc sleep).
 /// `nsubscriptions == 0` → nevents=0.
 ///
-/// **Every valid fd subscription is ready immediately** (ADR-0217). No kind
+/// **Every valid fd subscription is ready immediately ** (ADR-0217). No kind
 /// `FdKind` holds has a blocking point — a stdin read copies out of
 /// `host.stdin_bytes` or reports EOF, a write reaches a capture buffer or the
 /// process stream, a `.file` read or write is positional — so "the matching

@@ -10,7 +10,7 @@
 //! reuses each one's existing CodeMap for the containment test + the
 //! abs→module-relative PC normalization.
 //!
-//! **Every path that heap-pins a `JitInstance` must register it** — the C
+//! **Every path that heap-pins a `JitInstance` must register it ** — the C
 //! API's `instantiateJit` and the spec runner. An instance that is not in
 //! here cannot be unwound through: a throw inside it resolves to nothing,
 //! so no handler is found and the walk runs on into host frames (#426).
@@ -18,7 +18,7 @@
 //! calls between teardown and landing); growth happens in `register`, at
 //! instantiation, where allocating is allowed.
 //!
-//! **Capacity is growable, not capped.** Past `initial_slots` a doubled
+//! **Capacity is growable, not capped. ** Past `initial_slots` a doubled
 //! table is published with an atomic store and the superseded one is KEPT,
 //! because an in-flight reader may still hold its pointer. Nothing is freed,
 //! so the retained total is the sum of the generations: under 2× the FINAL
@@ -32,13 +32,13 @@
 //! instance, not per slot (`slot orelse continue`), so capacity only ever
 //! cost memory.
 //!
-//! **Concurrency: the table only.** `register` / `unregister` serialize under
+//! **Concurrency: the table only. ** `register` / `unregister` serialize under
 //! `table_lock`, and readers take no lock, loading each published slot
 //! atomically — so a scan cannot see a half-written slot or walk a table
 //! being grown. That is the whole of the guarantee, and it is deliberately
 //! narrower than "thread-safe".
 //!
-//! **There is no reclamation, and the read path cannot have one.** A reader
+//! **There is no reclamation, and the read path cannot have one. ** A reader
 //! loads a `*JitRuntime` and then dereferences it (`cmapFor`), and `resolve` /
 //! `codeMapForPc` hand back slices INTO that runtime which the trampoline
 //! keeps using after the lookup returns. Storing null in the slot stops the
@@ -117,7 +117,7 @@ fn grow(comptime Slot: type, live: **Table(Slot), empty: Slot) error{OutOfMemory
     @atomicStore(*Table(Slot), live, next, .release);
 }
 
-var rt_gen0_slots: [initial_slots]?*jit_abi.JitRuntime = .{null} ** initial_slots;
+var rt_gen0_slots: [initial_slots]?*jit_abi.JitRuntime = @splat(null);
 var rt_gen0: Table(?*jit_abi.JitRuntime) = .{ .slots = &rt_gen0_slots, .prev = null };
 var rts: *Table(?*jit_abi.JitRuntime) = &rt_gen0;
 
@@ -142,7 +142,7 @@ var rts: *Table(?*jit_abi.JitRuntime) = &rt_gen0;
 /// already sat, and it costs one extra load rather than a retry loop on the
 /// allocation-free unwind path.
 const ThunkRange = struct { seq: usize = 0, start: usize = 0, len: usize = 0 };
-var thunk_gen0_slots: [initial_slots]ThunkRange = .{ThunkRange{}} ** initial_slots;
+var thunk_gen0_slots: [initial_slots]ThunkRange = @splat(ThunkRange{});
 var thunk_gen0: Table(ThunkRange) = .{ .slots = &thunk_gen0_slots, .prev = null };
 var thunk_ranges: *Table(ThunkRange) = &thunk_gen0;
 

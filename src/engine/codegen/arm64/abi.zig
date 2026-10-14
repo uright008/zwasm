@@ -286,7 +286,7 @@ const zir_op_count = @typeInfo(zir.ZirOp).@"enum".fields.len;
 /// declaration; enforced by the canonical
 /// `validateRegallocOpScratchReservation` check).
 pub const op_scratch_reservation_table: [zir_op_count][]const u16 = blk: {
-    var t: [zir_op_count][]const u16 = .{&.{}} ** zir_op_count;
+    var t: [zir_op_count][]const u16 = @splat(&.{});
     t[@intFromEnum(zir.ZirOp.@"table.fill")] = &bulk_handler_reservation;
     t[@intFromEnum(zir.ZirOp.@"table.copy")] = &bulk_handler_reservation;
     t[@intFromEnum(zir.ZirOp.@"table.init")] = &bulk_handler_reservation;

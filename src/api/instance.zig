@@ -1175,8 +1175,8 @@ fn hasV128Param(sig: zir.FuncType) bool {
 }
 
 test "hasV128Param: only a v128 parameter is declined; results and every scalar class are not (#390)" {
-    const i32s = [_]zir.ValType{.i32} ** 12;
-    const three = [_]zir.ValType{.i32} ** 3;
+    const i32s = @as([12]zir.ValType, @splat(.i32));
+    const three = @as([3]zir.ValType, @splat(.i32));
     try testing.expect(!hasV128Param(.{ .params = &i32s, .results = &three }));
     try testing.expect(!hasV128Param(.{ .params = &.{ .f64, .f32, .i64, .{ .ref = zir.RefType.abs(.func, true) } }, .results = &.{.v128} }));
     try testing.expect(hasV128Param(.{ .params = &.{ .i32, .v128 }, .results = &.{} }));

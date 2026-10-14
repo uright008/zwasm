@@ -1070,7 +1070,7 @@ pub const FuncRet_i32i64 = extern struct {
 /// Multi-result return for `(i32, i32)`. Spec `multi` /
 /// `type-all-i32-i32` / `value-i32-i32` families.
 ///
-/// **Layout convention** (entry.zig multi-result): each field is
+/// **Layout convention ** (entry.zig multi-result): each field is
 /// u64-padded so the struct's total size is ≥ 16 bytes, forcing
 /// AAPCS64 / SysV to return via the X0+X1 (RAX+RDX on SysV)
 /// register-pair path instead of packing two fields into a single

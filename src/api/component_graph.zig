@@ -1,5 +1,5 @@
 // FILE-SIZE-EXEMPT: single instantiateGraph recursion; 62 private helpers share graph state — N2 on any cut (investigated 2026-08-12, per ADR-0099; re-triage on growth)
-//! Multi-component **graph** orchestration (Zone 3; D-305).
+//! Multi-component **graph ** orchestration (Zone 3; D-305).
 //!
 //! `instantiateGraph` evaluates a composed component's outer `instance`
 //! section in definition order. Each child component is itself a full
@@ -1462,7 +1462,7 @@ fn canonIsByValueBlob(t: canon.CanonType) bool {
 /// to `defineFuncRaw`. Every flat-scalar/string/list boundary flattens to all-i32
 /// core words, so one static all-i32 array serves them all — no per-boundary
 /// allocation (D-305). Sized to the linker's raw-arity cap.
-const boundary_core_i32: [marshal.raw_max_words]zir.ValType = .{.i32} ** marshal.raw_max_words;
+const boundary_core_i32: [marshal.raw_max_words]zir.ValType = @splat(.i32);
 
 /// The resolved boundary shape: whether the func flattens to the all-i32 core
 /// signature the generic trampoline marshals, and its flattened param word count.

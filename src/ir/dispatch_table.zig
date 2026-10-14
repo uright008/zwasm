@@ -16,6 +16,7 @@
 //! Zone 1 — imports `ir/zir.zig` only.
 
 const std = @import("std");
+const type_info_compat = @import("../type_info_compat.zig");
 const zir = @import("zir.zig");
 
 pub const ZirOp = zir.ZirOp;
@@ -24,7 +25,7 @@ pub const ZirInstr = zir.ZirInstr;
 /// Compile-time count of declared `ZirOp` tags. Determines the
 /// fixed-array size of every dispatch slot. Adding a tag to
 /// `ZirOp` (a §4 deviation requiring an ADR) grows N_OPS.
-pub const N_OPS: comptime_int = @typeInfo(ZirOp).@"enum".fields.len;
+pub const N_OPS: comptime_int = @typeInfo(ZirOp).@"enum".field_names.len;
 
 pub const ParserCtx = opaque {};
 pub const InterpCtx = opaque {};
@@ -62,7 +63,7 @@ test "DispatchTable.init: every slot is null" {
 }
 
 test "DispatchTable: N_OPS matches ZirOp tag count" {
-    try std.testing.expectEqual(@typeInfo(ZirOp).@"enum".fields.len, N_OPS);
+    try std.testing.expectEqual(@typeInfo(ZirOp).@"enum".field_names.len, N_OPS);
 }
 
 test "DispatchTable: per-op slot can be set and read back" {

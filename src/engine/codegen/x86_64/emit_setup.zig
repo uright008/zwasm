@@ -34,12 +34,12 @@ const Error = types.Error;
 /// the args that overflow the per-Cc register pools and sum the
 /// per-slot 8-byte allocations; track the max across all calls.
 ///
-/// **SysV** (System V x86_64 §3.2.3): int args use arg_gprs[1..6]
+/// **SysV ** (System V x86_64 §3.2.3): int args use arg_gprs[1..6]
 /// (5 user slots; arg_gprs[0] = RDI = runtime_ptr per ADR-0026).
 /// FP args use arg_xmms[0..7] (8 user slots, independent counter).
 /// Per-call overflow = `(max(0, n_int - 5) + max(0, n_fp - 8)) * 8`.
 ///
-/// **Win64** (Microsoft x64): int and FP share slots arg_gprs[1..3]
+/// **Win64 ** (Microsoft x64): int and FP share slots arg_gprs[1..3]
 /// (3 user slots; arg_gprs[0] = RCX = runtime_ptr). Total user
 /// args > 3 ⇒ overflow. The shared shadow-space-prefixed region
 /// places overflow at `[RSP + 32 + 8*K]`, so the outgoing region

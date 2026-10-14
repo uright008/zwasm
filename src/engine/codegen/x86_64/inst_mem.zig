@@ -26,7 +26,7 @@ const rexForRR = inst.rexForRR;
 /// implicitly zero-extends to 64 bits). dst occupies ModR/M.reg,
 /// src occupies r/m (same role inversion as IMUL).
 ///
-/// **REX always emitted** for the same low-byte addressability
+/// **REX always emitted ** for the same low-byte addressability
 /// reason as SETcc.
 pub fn encMovzxR32R8(dst: Gpr, src: Gpr) EncodedInsn {
     var enc: EncodedInsn = .{};
@@ -356,7 +356,7 @@ pub fn encStoreR16MemBaseIdx(src: Gpr, base: Gpr, idx: Gpr) EncodedInsn {
 }
 
 /// `MOV [base + idx], r8` (opcode 0x88 with SIB). 8-bit store;
-/// used by i32.store8. **Always emits REX** so r8-r15 + the
+/// used by i32.store8. **Always emits REX ** so r8-r15 + the
 /// SPL/BPL/SIL/DIL low-byte forms encode correctly (without REX,
 /// reg=4..7 means AH/CH/DH/BH).
 ///
@@ -560,7 +560,7 @@ pub fn encLeaR64BaseDisp8(dst: Gpr, base: Gpr, disp: i8) EncodedInsn {
 /// slot per Microsoft x64 ABI §"Parameter passing" hidden-
 /// pointer recipe.
 ///
-/// **Caller constraint** (same as disp8 sibling): `base` must NOT
+/// **Caller constraint ** (same as disp8 sibling): `base` must NOT
 /// be RSP (low3=0b100). RBP / R13 are safe (mod=10 disp32 form is
 /// direct disp, no SIB). RSP base would mandate a SIB byte; this
 /// encoder emits none and would produce a malformed instruction.

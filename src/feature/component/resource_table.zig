@@ -1,4 +1,4 @@
-//! Resource **handle table** (CM campaign chunk C1; spec `CanonicalABI.md`
+//! Resource **handle table ** (CM campaign chunk C1; spec `CanonicalABI.md`
 //! §Resource State / `Table` / `canon resource.{new,drop,rep}`).
 //!
 //! A component instance's `handles` table: a dense array + free list mapping

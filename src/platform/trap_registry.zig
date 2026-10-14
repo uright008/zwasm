@@ -3,11 +3,11 @@
 //! "internal zwasm bug".
 //!
 //! Two tables:
-//! - **Guarded reservations** `[base, end)` — auto-registered by
+//! - **Guarded reservations ** `[base, end)` — auto-registered by
 //!   `guarded_mem.reserve` / auto-unregistered by `release` (single
 //!   chokepoint; no caller can forget an unregister on any of the
 //!   several release paths).
-//! - **JIT code regions** `[start, end)` + a per-function table of
+//! - **JIT code regions ** `[start, end)` + a per-function table of
 //!   `{code_off, oob_stub_off}` (sorted by `code_off`, built by the
 //!   linker at publish) — registered where the code block is
 //!   published, unregistered where it is freed.

@@ -241,7 +241,7 @@ pub const EmitCtx = struct {
     /// `exception_table_builder` is non-null.
     landing_pad_fixups: ?*std.ArrayList(exception_table.LandingPadFixup) = null,
     /// Per-defined-global metadata (ADR-0052).
-    /// Indexed by **defined** global idx (= wasm-space global
+    /// Indexed by **defined ** global idx (= wasm-space global
     /// idx minus the leading imported-global count). Parallel
     /// arrays: `globals_offsets[i]` is the byte offset of
     /// global i inside the runtime's globals byte buffer;

@@ -25,10 +25,10 @@
 //!
 //! ## Stage gates (conservative; widened in later ADR-0155 stages)
 //!
-//! - **aarch64 + x86_64** (stage 4 added x86_64) — K=0 on every other arch.
+//! - **aarch64 + x86_64 ** (stage 4 added x86_64) — K=0 on every other arch.
 //!   The per-arch `max_homed` keeps `temp_reserve` GPRs for temporaries (x86_64
 //!   has only 4 allocatable GPRs vs arm64's 8 → cap 2 vs 6).
-//! - **no GC/memory TRAMPOLINE op** (stage 2b) — `memory.grow`, `struct.new*`,
+//! - **no GC/memory TRAMPOLINE op ** (stage 2b) — `memory.grow`, `struct.new*`,
 //!   `array.*`, `ref.test*`, `ref.cast*`, `br_on_cast*` route through a Zig
 //!   trampoline whose caller-saved clobber the call-site spill/reload does not
 //!   yet cover; any function containing one homes nothing. Plain calls
@@ -36,12 +36,12 @@
 //!   from stage 2: the arm64 op_call emit spills caller-saved homed locals
 //!   before the BL/BLR and reloads them after (tail calls need no reload —
 //!   control does not return).
-//! - **scalar GPR locals only** — i32 / i64 / ref. f32/f64/v128 are FP-class
+//! - **scalar GPR locals only ** — i32 / i64 / ref. f32/f64/v128 are FP-class
 //!   (stage 3); GcRef stays slot-homed for GC-scan visibility (ADR-0155
 //!   anti-regression invariant 2; reftype here means a non-GC funcref/externref
 //!   which the conservative scan does not chase into registers — but to stay on
 //!   the safe side we home only i32/i64, NOT ref, in stage 1).
-//! - **capacity** — at most `max_homed` locals are homed (the low GPR slots
+//! - **capacity ** — at most `max_homed` locals are homed (the low GPR slots
 //!   reserved for homing); the rest stay slot-homed (overflow).
 //!
 //! Zone 1 (`src/ir/`).
@@ -286,7 +286,7 @@ test "plan: f32/f64/v128/ref locals stay slot-homed (skipped)" {
 }
 
 test "plan: caps at max_homed" {
-    var f = freshFunc(&([_]ValType{.i32} ** 10));
+    var f = freshFunc(&(@as([10]ValType, @splat(.i32))));
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .end });

@@ -1,4 +1,4 @@
-//! Wasm binary module **header + section iterator** (Phase 1 / §9.1 / 1.4).
+//! Wasm binary module **header + section iterator ** (Phase 1 / §9.1 / 1.4).
 //!
 //! Validates magic + version, then walks the section sequence, returning
 //! a `Module` struct that borrows raw section bodies from the input.
@@ -93,7 +93,7 @@ pub fn parse(alloc: Allocator, input: []const u8) Error!Module {
 
     var pos: usize = 8;
     var last_known_order: u8 = 0;
-    var seen = [_]bool{false} ** 14;
+    var seen = @as([14]bool, @splat(false));
 
     while (pos < input.len) {
         const section_start = pos;
@@ -160,7 +160,7 @@ pub fn parse(alloc: Allocator, input: []const u8) Error!Module {
 ///   type(1), import(2), function(3), table(4), memory(5), global(6),
 ///   export(7), start(8), element(9), code(10), data(11)
 /// Bulk-memory adds data_count(12) which sits between **element(9)
-/// and code(10)** per the Bulk Memory Operations proposal §3.4
+/// and code(10) ** per the Bulk Memory Operations proposal §3.4
 /// (the section was inserted at that position so producers can
 /// declare data segment count before parsing code that references
 /// it via `memory.init` / `data.drop`). TinyGo emits data_count

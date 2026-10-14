@@ -1,4 +1,4 @@
-//! Component binary **discriminator + top-level section walk** (CM campaign
+//! Component binary **discriminator + top-level section walk ** (CM campaign
 //! chunk A1; spec `component-model/design/mvp/Binary.md`).
 //!
 //! The Component Model defines a *second* binary format that shares the

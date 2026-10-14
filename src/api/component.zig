@@ -1,4 +1,4 @@
-//! Component Model **host orchestration** (Zone 3; CM campaign chunk B6).
+//! Component Model **host orchestration ** (Zone 3; CM campaign chunk B6).
 //!
 //! Per ADR-0172 the engine-driving orchestration lives here (Zone 3): it
 //! decodes a component (Zone-1 `feature/component/decode`), instantiates the

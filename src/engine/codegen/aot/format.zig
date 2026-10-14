@@ -9,7 +9,7 @@
 //! `parseReloc` helpers.
 //!
 //! All multi-byte fields are little-endian. The header is
-//! exactly **60 bytes** (ADR-0039's "56 bytes" was an
+//! exactly **60 bytes ** (ADR-0039's "56 bytes" was an
 //! arithmetic miscount; corrected by ADR-0039 Revision 2);
 //! per-func metadata is exactly 12 bytes per entry; relocs
 //! are 9 bytes each (4 + 4 + 1, packed). All three are

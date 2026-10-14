@@ -1187,7 +1187,7 @@ pub fn emitI32x4DotI16x8S(allocator: Allocator, buf: *std.ArrayList(u8), alloc: 
 
 /// `i16x8.relaxed_dot_i8x16_i7x16_s` — single PMADDUBSW with SWAPPED
 /// operands: PMADDUBSW(dst, src) = unsigned_dst × signed_src, but relaxed_dot
-/// needs **signed a** × b. So dst = b (the i7 operand, treated unsigned — that
+/// needs **signed a ** × b. So dst = b (the i7 operand, treated unsigned — that
 /// is the spec's b-latitude, `(either)`-covered) and src = a (signed). Passing
 /// a as the unsigned dst is WRONG for a<0 (caught by the official corpus on
 /// x86: a=0x80 gave +32512 vs signed −32512). arm64 SMULL is signed×signed.
@@ -1219,8 +1219,8 @@ pub fn emitI16x8RelaxedDot(allocator: Allocator, buf: *std.ArrayList(u8), alloc:
 /// `i32x4.relaxed_dot_i8x16_i7x16_add_s` (3-pop a,b,c) — 4-way i8 dot +
 /// accumulate: PMADDUBSW→i16x8; PMADDWD(·, ones_i16)→i32x4 pairwise sum;
 /// PADDD(·, c). ones_i16 const-free via PCMPEQW+PSRLW#15. PMADDUBSW(dst,src) =
-/// unsigned_dst × signed_src → dst MUST hold **b** (i7 operand, unsigned per
-/// the spec b-latitude, `(either)`-covered) and src **a** (signed) — passing a
+/// unsigned_dst × signed_src → dst MUST hold **b ** (i7 operand, unsigned per
+/// the spec b-latitude, `(either)`-covered) and src **a ** (signed) — passing a
 /// as unsigned dst is wrong for a<0 (official-corpus bug). Staging: force a→XMM15,
 /// c→XMM14, b→dst; PMADDUBSW(dst=b, XMM15=a).
 pub fn emitI32x4RelaxedDotAdd(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regalloc.Allocation, pushed_vregs: *std.ArrayList(u32), next_vreg: *u32, spill_base_off: u32) Error!void {
@@ -1275,7 +1275,7 @@ pub fn emitI32x4RelaxedDotAdd(allocator: Allocator, buf: *std.ArrayList(u8), all
 }
 
 /// 16-byte 0x0F-per-byte mask used by popcnt's nibble-split path.
-const NIBBLE_MASK_BROADCAST: [16]u8 = [_]u8{0x0F} ** 16;
+const NIBBLE_MASK_BROADCAST: [16]u8 = @as([16]u8, @splat(0x0F));
 
 /// Wasm spec §4.4.4 (i8x16.popcnt) per-byte popcount LUT used by
 /// popcnt's PSHUFB-LUT path. Byte i = popcount(i) for i in 0..15.

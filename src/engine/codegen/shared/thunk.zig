@@ -109,7 +109,7 @@ pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.Func
 // invoked. Lifetime is owned by the per-instance JitModule:
 // `freeArena` runs alongside `JitModule.deinit`.
 //
-// An instance with **zero** Wasm-cross-module function imports
+// An instance with **zero ** Wasm-cross-module function imports
 // — including the common case of host-C-fn-only imports
 // (e.g. `(import "spectest" "print_i32" ...)`) — gets the
 // empty-arena sentinel (`bytes.len == 0`). Slot lookups are

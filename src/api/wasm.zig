@@ -7,7 +7,7 @@
 //! v0.1.0 surface).
 //!
 //! After the §9.5 / 5.0 carve-out (ADR-0007), this file is the
-//! **public re-export hub** for the binding. The actual code
+//! **public re-export hub ** for the binding. The actual code
 //! lives in sibling modules:
 //!
 //! - `wasi.zig`          — WASI thunks + `zwasm_wasi_config_*`

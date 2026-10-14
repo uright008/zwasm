@@ -205,7 +205,7 @@ const ControlFrame = struct {
     /// type. Single-result Wasm 1.0 forms use `.single`; empty
     /// uses `.empty`; multi-value 2.0 typeidx may use `.multi`.
     end_type: BlockType,
-    /// Operand-stack height at frame entry, **after** params have
+    /// Operand-stack height at frame entry, **after ** params have
     /// been popped + re-pushed (i.e. the height seen from outside
     /// the block, before the block's own params land on the
     /// stack). `popAny` floor checks against this so the block
@@ -2647,7 +2647,7 @@ pub const Validator = struct {
     /// type and the popped callee must be a subtype of
     /// `(ref null typeidx)`. Pop the typeidx-determined params;
     /// verify that the callee's results match the **enclosing
-    /// function's** return type (else the tail call would lose
+    /// function's ** return type (else the tail call would lose
     /// values); mark the stack polymorphic-from-here (= unreachable)
     /// per spec. Runtime trap semantics inherit call_ref's null +
     /// sig-mismatch behaviour.

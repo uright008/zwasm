@@ -2121,7 +2121,7 @@ test "fdFilestatGet: stdout reports unknown without io; bad fd is badf" {
 test "pathUnlinkFile: non-preopen dirfd is notdir; bad fd is badf; .. escape is notcapable" {
     var h = try Host.init(testing.allocator);
     defer h.deinit();
-    var mem = [_]u8{ 'a', '.', 't', 'x', 't' } ++ [_]u8{0} ** 16;
+    var mem = [_]u8{ 'a', '.', 't', 'x', 't' } ++ @as([16]u8, @splat(0));
     // fd 1 (stdout) is not a .dir → notdir.
     try testing.expectEqual(p1.Errno.notdir, pathUnlinkFile(&h, &mem, 1, 0, 5));
     // out-of-range fd → badf.

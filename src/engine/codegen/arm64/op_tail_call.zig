@@ -217,7 +217,7 @@ pub fn emitDirectReturnCall(
 }
 
 /// Cross-module `return_call $import` (ADR-0112 Amendment 2026-05-30,
-/// D-206 step 2). Lowered as **call-and-return** through the ADR-0066
+/// D-206 step 2). Lowered as **call-and-return ** through the ADR-0066
 /// bridge thunk (planted in `host_dispatch_base[idx]`, which
 /// save/restores `abi.reserved_invariant_gprs` across its BLR)
 /// followed by the normal frame teardown + RET — i.e. the emit shape

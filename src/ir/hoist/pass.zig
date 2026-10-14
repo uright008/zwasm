@@ -21,7 +21,7 @@
 //! (which the naive instr-move attempt of 8.4-c violated; see
 //! lesson `2026-05-08-hoist-vreg-semantic.md`).
 //!
-//! MVP scope: hoists to the **outermost** containing loop.
+//! MVP scope: hoists to the **outermost ** containing loop.
 //! Multiple identical constants each get their own synthetic
 //! local in this MVP (pooling deferred to Phase 15).
 //! Transitive hoisting (e.g. `i32.add` of two loop-invariant
@@ -192,7 +192,7 @@ pub fn run(allocator: Allocator, func: *ZirFunc) Error!void {
     }
 
     // §9.8a / 8a.5-c — DO NOT shift `branch_targets[]`. Each
-    // entry is a Wasm br/br_table **depth** (block-stack index),
+    // entry is a Wasm br/br_table **depth ** (block-stack index),
     // not a PC — see `lower.zig:emitBrTable` (reads ULEB128
     // depth) + `arm64/op_control.zig:emitBranchToDepth` (treats
     // value as `depth > labels.items.len → UnsupportedOp`).

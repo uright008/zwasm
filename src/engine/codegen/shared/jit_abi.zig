@@ -467,7 +467,7 @@ pub const JitRuntime = extern struct {
     /// Consequence §3. Layout-stable tail: added after the
     /// handler-dispatch trio so existing prologue offsets
     /// are unaffected.
-    eh_payload_buf: [16]u64 = [_]u64{0} ** 16,
+    eh_payload_buf: [16]u64 = @as([16]u64, @splat(0)),
     /// EH payload length (N from `tag_param_counts[tag_idx]` at
     /// the most recent throw site). See `eh_payload_buf`.
     eh_payload_len: u32 = 0,

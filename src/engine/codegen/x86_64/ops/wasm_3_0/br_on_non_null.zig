@@ -16,7 +16,7 @@
 //! branch); for `br_on_non_null` the label expects `k+1` (ref passed
 //! AS the topmost label value). So:
 //!
-//! - **Peek** ref vreg (don't pop yet) → `pushed_vregs` carries k+1
+//! - **Peek ** ref vreg (don't pop yet) → `pushed_vregs` carries k+1
 //!   entries (matching `label.result_arity == k+1`).
 //! - `TEST Rn, Rn (.q)` + `JE skip_byte` (skip past merge+JMP on null).
 //! - `captureOrEmitBlockMergeMovCtx(ctx, tgt_idx)` — places k+1 values
@@ -24,7 +24,7 @@
 //! - `JMP rel32 (placeholder)` → append fixup to
 //!   `labels[tgt_idx].pending`.
 //! - Patch `JE` skip disp.
-//! - **Pop** ref from `pushed_vregs` (consumed on null fall-through;
+//! - **Pop ** ref from `pushed_vregs` (consumed on null fall-through;
 //!   the peek meant we never popped, so pop now).
 //!
 //! No `usesRuntimePtr` concern (label fixups, not bounds-fixups).

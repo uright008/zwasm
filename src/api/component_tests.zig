@@ -4,6 +4,7 @@
 //! test-isolation; mirrors `validator_tests.zig`). The impl file stays lean.
 
 const std = @import("std");
+const net_io = @import("../io_net_compat.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -1509,11 +1510,11 @@ fn tcpEchoServerOnce(io: std.Io, server: *std.Io.net.Server) void {
     defer conn.close(io);
     var buf: [16]u8 = undefined;
     var bufs = [_][]u8{&buf};
-    const n = io.vtable.netRead(io.userdata, conn.socket.handle, &bufs) catch return;
+    const n = net_io.read(io, conn.socket.handle, &bufs) catch return;
     var reply_buf: [32]u8 = undefined;
     const reply = std.fmt.bufPrint(&reply_buf, "pong-{s}", .{buf[0..n]}) catch return;
     const data = [_][]const u8{reply};
-    _ = io.vtable.netWrite(io.userdata, conn.socket.handle, "", &data, 1) catch return;
+    _ = net_io.write(io, conn.socket.handle, data) catch return;
 }
 
 test "ADR-0180: a real rust wasip2 TCP client connects + echoes through wasi:sockets" {
@@ -1564,13 +1565,13 @@ fn tcpClientOnce(io: std.Io, port: u16) void {
     } else return;
     defer stream.close(io);
     const data = [_][]const u8{"ping"};
-    _ = io.vtable.netWrite(io.userdata, stream.socket.handle, "", &data, 1) catch return;
+    _ = net_io.write(io, stream.socket.handle, data) catch return;
     // Read until the guest's full "ping-ack" reply arrived (2 writes).
     var buf: [16]u8 = undefined;
     var total: usize = 0;
     while (total < 8) {
         var bufs = [_][]u8{buf[total..]};
-        const n = io.vtable.netRead(io.userdata, stream.socket.handle, &bufs) catch return;
+        const n = net_io.read(io, stream.socket.handle, &bufs) catch return;
         if (n == 0) return;
         total += n;
     }
@@ -2061,7 +2062,7 @@ test "ADR-0205 A: official wasip3 binary decodes the async-support canon builtin
 
     // The wit-bindgen async runtime imports the full builtin set; decode must
     // surface each (previously Error.UnsupportedCanon killed the whole binary).
-    var seen = [_]bool{false} ** 6; // task_cancel, subtask_cancel, subtask_drop, ctx_get, ctx_set, ws_poll
+    var seen = @as([6]bool, @splat(false)); // task_cancel, subtask_cancel, subtask_drop, ctx_get, ctx_set, ws_poll
     var async_lowers: usize = 0;
     for (info.canons.items) |c| switch (c) {
         .task_cancel => seen[0] = true,

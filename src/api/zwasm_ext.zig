@@ -614,7 +614,7 @@ test "#331: the three engines agree on every host-originated trap kind" {
 /// it catches a stale `build_options` and an accessor that later grows a
 /// hardcoded string.
 ///
-/// **This test requires CWD = the repository root.** The manifest cannot be
+/// **This test requires CWD = the repository root. ** The manifest cannot be
 /// reached at comptime: `@embedFile("../../build.zig.zon")` is rejected with
 /// "embed of file outside package path", because the root module is
 /// `src/zwasm.zig` and the package root is therefore `src/` (measured on Zig

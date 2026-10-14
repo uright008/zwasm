@@ -156,7 +156,7 @@ pub fn computeCallOverflowBytes(callee_sig: FuncType) u32 {
 /// If `N < num_imports` (the leading
 /// wasm-space slots that name imports), the call routes to the
 /// function-local trap stub instead of a body-relative BL —
-/// **every import call traps unconditionally** until the
+/// **every import call traps unconditionally ** until the
 /// host-call dispatcher is wired up. Args are still marshalled
 /// (harmless waste; the trap branch jumps over the rest of the
 /// call sequence) and the result vreg is still allocated /
@@ -363,7 +363,7 @@ fn emitCallIndirectSubtype(
 /// to the shared trap stub via ctx.bounds_fixups), loads the
 /// funcptr, restores X0, BLR.
 ///
-/// **Multi-table dispatch** (D-112):
+/// **Multi-table dispatch ** (D-112):
 /// `ins.extra` carries the table_idx LEB128 byte from
 /// lower.zig:927 (Wasm 2.0 §3.4.6 `call_indirect tableidx
 /// typeidx`). For table_idx == 0 the fast path uses the
@@ -437,7 +437,7 @@ pub fn emitCallIndirect(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
 
         // Sig: LDR W16, [X24, X17, LSL #2] ; CMP W16, #canonical ;
         // B.NE trap. Wasm spec §3.4.6 + §4.4.10.1 — the sig check is
-        // **structural** FuncType equality. Compare against the
+        // **structural ** FuncType equality. Compare against the
         // canonical (lowest-index) typeidx whose shape matches
         // `module_types[ins.payload]`; `applyTableInit` writes the
         // same canonicalization on the funcref's stored typeidx. D-111.
@@ -668,7 +668,7 @@ pub fn marshalCallArgs(ctx: *EmitCtx, callee_sig: FuncType) Error!void {
     // Standard AAPCS64: every scalar overflow consumes 8 bytes
     // regardless of width; v128 consumes 16 with 16-byte align.
     //
-    // **Apple arm64 (macOS/iOS/watchOS/tvOS)** per Apple's
+    // **Apple arm64 (macOS/iOS/watchOS/tvOS) ** per Apple's
     // "Writing ARM64 Code for Apple Platforms": stack overflow
     // args use their NATURAL size with natural alignment, so
     // consecutive i32+f32 pack into 4+4=8 bytes (not 8+8).

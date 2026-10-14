@@ -24,7 +24,7 @@
 //! …so the Zone 1 ↔ Zone 2 boundary is preserved while comptime DCE
 //! works on every axis.
 //!
-//! §9.12-B / B10 lands this file with **stub** handlers that return
+//! §9.12-B / B10 lands this file with **stub ** handlers that return
 //! `error.NotMigrated`. The dispatch_collector framework validates the
 //! shape; the live dispatch path still routes through the legacy
 //! switches in validator.zig / lower.zig / interp/dispatch.zig until

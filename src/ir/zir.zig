@@ -1,7 +1,7 @@
 // FILE-SIZE-EXEMPT: ZIR container-type identity catalog (§P13); ZirOp data already lives in zir_ops.zig, remaining carve-outs are N3-shallow (investigated 2026-08-12, per ADR-0099)
 //! ZIR (Zwasm Intermediate Representation) — container types only.
 //!
-//! Phase 1 / task 1.1 declares the **type identities** required by
+//! Phase 1 / task 1.1 declares the **type identities ** required by
 //! ROADMAP §4.2's `ZirFunc` pseudocode. Per ROADMAP §P13 ("type
 //! up-front, slots over flags") every `?T` analysis / regalloc /
 //! optimisation slot is reserved day 1; later phases populate the

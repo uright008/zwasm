@@ -18,6 +18,7 @@
 //! Both are caller obligations with no runtime guard.
 
 const std = @import("std");
+const type_info_compat = @import("../type_info_compat.zig");
 const Allocator = std.mem.Allocator;
 const dbg = @import("../support/dbg.zig");
 
@@ -310,7 +311,7 @@ pub const Linker = struct {
         err_map: ?_marshal.HostErrorMap,
     ) !void {
         const fn_info = @typeInfo(Sig).@"fn";
-        if (fn_info.params.len == 0 or (fn_info.params[0].type orelse return error.SignatureMismatch) != *Caller) {
+        if (fn_info.param_types.len == 0 or (fn_info.param_types[0] orelse return error.SignatureMismatch) != *Caller) {
             @compileError("Linker.defineFunc: host fn must take *Caller as first param");
         }
         const Ctx = _marshal.HostFnCtx(Sig);

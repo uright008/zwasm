@@ -87,7 +87,7 @@ noinline fn runFrame(
 }
 
 /// Walk an instruction sequence linearly. The loop tracks `pc`
-/// on the **current frame** (`rt.currentFrame().pc`) so control-
+/// on the **current frame ** (`rt.currentFrame().pc`) so control-
 /// flow handlers (`br` / `br_if` / `br_table` / `return` / `if`
 /// / `else` / `end`) can mutate it directly. If a handler does
 /// not change `pc`, the loop advances by 1.

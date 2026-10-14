@@ -512,7 +512,7 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
 const testing = std.testing;
 
 /// Wrapper that sets up the pinned `*JitRuntime` register, installs
-/// a 2-slot **sentinel frame** as the trampoline's initial X29 / RBP,
+/// a 2-slot **sentinel frame ** as the trampoline's initial X29 / RBP,
 /// and calls the trampoline. The sentinel terminates the unwinder's
 /// frame-chain walk at depth 1 (`caller_fp == 0` → `.uncaught`) so
 /// the test never depends on the host process's frame-pointer chain

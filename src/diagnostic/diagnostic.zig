@@ -48,7 +48,7 @@ const std = @import("std");
 /// re-export.
 pub const trace = @import("trace.zig");
 
-/// Initial tag set. Numbering is **draft** in phase 1; M4 locks
+/// Initial tag set. Numbering is **draft ** in phase 1; M4 locks
 /// the values when the C-ABI accessor family ships, after which
 /// adding a tag is append-only. Phase 1 callers should reference
 /// tags by name, never by integer.

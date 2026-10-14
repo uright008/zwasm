@@ -1,4 +1,4 @@
-//! WIT **lexer** (CM campaign chunk A3; spec `component-model/design/mvp/WIT.md`).
+//! WIT **lexer ** (CM campaign chunk A3; spec `component-model/design/mvp/WIT.md`).
 //!
 //! Tokenizes the WIT IDL into the token stream the parser consumes. WIT
 //! identifiers are kebab-case (`is-even`, `no-return`) with an optional `%`

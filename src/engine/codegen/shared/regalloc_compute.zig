@@ -912,7 +912,7 @@ test "D-489: call-spanning spill + normal-path spill never share a slot" {
 
 test "validateRegallocOpScratchReservation: well-formed table compiles" {
     comptime {
-        var t: [16][]const u16 = .{&.{}} ** 16;
+        var t: [16][]const u16 = @splat(&.{});
         t[3] = &.{ 0, 1, 2, 3, 4 };
         validateRegallocOpScratchReservation(t, 8);
     }
@@ -920,14 +920,14 @@ test "validateRegallocOpScratchReservation: well-formed table compiles" {
 
 test "validateRegallocOpScratchReservation: empty table compiles" {
     comptime {
-        const t: [4][]const u16 = .{&.{}} ** 4;
+        const t: [4][]const u16 = @splat(&.{});
         validateRegallocOpScratchReservation(t, 8);
     }
 }
 
 test "validateRegallocOpScratchReservation: edge case — single-slot reservation at threshold-1" {
     comptime {
-        var t: [2][]const u16 = .{&.{}} ** 2;
+        var t: [2][]const u16 = @splat(&.{});
         t[0] = &.{7};
         validateRegallocOpScratchReservation(t, 8);
     }

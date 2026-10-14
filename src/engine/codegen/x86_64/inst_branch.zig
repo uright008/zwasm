@@ -43,7 +43,7 @@ inline fn encF3_0F_R32R(opcode: u8, dst: Gpr, src: Gpr) EncodedInsn {
 /// the low byte of `dst` based on the EFLAGS condition. ModR/M:
 /// mod=11, reg=0 (always for SETcc), rm = dst.low3.
 ///
-/// **REX is always emitted.** For R8..R15 the REX.B bit is
+/// **REX is always emitted. ** For R8..R15 the REX.B bit is
 /// needed; for RBX/RBP/RSI/RDI any REX (including 0x40) is
 /// required to access the low-byte form (BL/BPL/SIL/DIL) rather
 /// than the high-byte aliases (BH/CH/DH/AH) which clash in

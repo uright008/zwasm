@@ -1,4 +1,4 @@
-//! WIT **parser** (CM campaign chunk A3; spec `component-model/design/mvp/WIT.md`).
+//! WIT **parser ** (CM campaign chunk A3; spec `component-model/design/mvp/WIT.md`).
 //!
 //! Parses the WIT token stream into an AST for the primitive subset:
 //! `package` decl + `interface` (with `func` items over primitive / named-ref

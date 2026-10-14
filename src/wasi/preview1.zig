@@ -322,7 +322,7 @@ pub const RIGHTS_DIRECTORY_APPLICABLE: Rights =
 /// component fd rights (`fd_sync`, `fd_datasync`, `fd_fdstat_set_flags`) that
 /// a preview1 guest is refused on the same directory.
 ///
-/// `inheriting` is **never** narrowed to that set: it is the ceiling for the
+/// `inheriting` is **never ** narrowed to that set: it is the ceiling for the
 /// FILES opened underneath, and clamping it there would strip FD_WRITE from
 /// every one of them.
 ///
@@ -394,7 +394,7 @@ pub const Filestat = extern struct {
     dev: Device,
     ino: Inode,
     filetype: Filetype,
-    _pad: [7]u8 = .{0} ** 7,
+    _pad: [7]u8 = @splat(0),
     nlink: Linkcount,
     size: Filesize,
     atim: Timestamp,
@@ -408,7 +408,7 @@ pub const Filestat = extern struct {
 /// the name itself. Size: 1 + 3 pad + 4 = 8 bytes.
 pub const Prestat = extern struct {
     pr_type: PreopenType,
-    _pad: [3]u8 = .{0} ** 3,
+    _pad: [3]u8 = @splat(0),
     pr_name_len: Size,
 };
 

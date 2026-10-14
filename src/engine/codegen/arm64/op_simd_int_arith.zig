@@ -475,7 +475,7 @@ pub fn emitI64x2Shl(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
 // int shift right (i*x*.shr_s, i*x*.shr_u)
 // ============================================================
 //
-// NEON's USHL/SSHL with **negative** shift amount in V<m>'s
+// NEON's USHL/SSHL with **negative ** shift amount in V<m>'s
 // per-lane element performs a right shift (logical for U,
 // arithmetic for S). The recipe extends `emitV128IntShl` with a
 // preceding NEG of the W<amt> (or X<amt> for i64x2) before DUP:

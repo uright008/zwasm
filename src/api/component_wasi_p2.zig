@@ -1,5 +1,5 @@
 // FILE-SIZE-EXEMPT: the WASI-P2 trampoline surface + classifier + component orchestration (ADR-0207 (b), M4-measured 2026-08-12); the P2 fs/sockets sub-split had no positive ADR-0099 condition (spec-closed clusters but shallow <300-LOC net gains), so honest-exempt over metric-split.
-//! WASI **Preview 2** trampolines + classifier + component orchestration —
+//! WASI **Preview 2 ** trampolines + classifier + component orchestration —
 //! ADR-0207 (b). The substrate (`WasiP2Ctx`, engines, straddle helpers)
 //! lives in `component_wasi_ctx.zig`; the 0.3 layer in
 //! `component_wasi_p3_host.zig`. This file is also the compat surface:
@@ -2059,7 +2059,7 @@ pub fn runWasiP2MainBuilt(built: *BuiltComponent) anyerror!void {
 }
 
 /// The unified WASI-component entry (D-335 Unit F): build once, then dispatch —
-/// an **async-lifted** export (a `canon lift` with `opts.is_async`) goes through
+/// an **async-lifted ** export (a `canon lift` with `opts.is_async`) goes through
 /// the P3 stackless callback loop, else the sync `wasi:cli/run` path. This is
 /// the surface the CLI / embedders call so an async P3 component "just runs".
 ///

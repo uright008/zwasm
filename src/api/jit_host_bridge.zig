@@ -8,7 +8,7 @@
 //! `WasmFuncCallback` ABI (`args:*ValVec, results:*ValVec`).
 //!
 //! Rather than emit per-arch reg-marshalling stubs, this plants a **Zig
-//! comptime-generated thunk** whose calling convention Zig itself lowers —
+//! comptime-generated thunk ** whose calling convention Zig itself lowers —
 //! arch-independent (no arm64/x86_64/Win64 codegen, no Rosetta verification).
 //! `thunkN_<ret>[K]` hardcodes its slot index K (comptime), reads
 //! `rt.host_payloads_base[K]` for the `*HostFuncPayload`, calls the callback,
@@ -28,6 +28,7 @@
 //! the planted fn-ptr (an opaque `usize`) crosses into Zone 2 setup.
 
 const std = @import("std");
+const type_info_compat = @import("../type_info_compat.zig");
 
 const jit_abi = @import("../engine/codegen/shared/jit_abi.zig");
 const handles = @import("handles.zig");
@@ -269,7 +270,7 @@ fn buildTable(comptime gen: anytype, comptime r: RetKind) Table(@TypeOf(gen(0, r
 /// Raw fn-ptr (as `usize`) for the all-GP arity-`N` thunk of result kind `r` at
 /// slot `idx`. `gen` is the per-arity GP thunk generator (t0..t4).
 fn ptrFor(comptime gen: anytype, r: RetKind, idx: usize) usize {
-    inline for (std.meta.fields(RetKind)) |rf| {
+    inline for (type_info_compat.enumFields(RetKind)) |rf| {
         if (r == @field(RetKind, rf.name)) {
             const tab = comptime buildTable(gen, @field(RetKind, rf.name));
             return @intFromPtr(tab[idx]);
@@ -280,9 +281,9 @@ fn ptrFor(comptime gen: anytype, r: RetKind, idx: usize) usize {
 
 /// FP-path fn-ptr for a 1-arg thunk of arg-kind `k0` + result `r` at slot `idx`.
 fn fpPtr1(k0: Kind, r: RetKind, idx: usize) usize {
-    inline for (std.meta.fields(Kind)) |kf| {
+    inline for (type_info_compat.enumFields(Kind)) |kf| {
         if (k0 == @field(Kind, kf.name)) {
-            inline for (std.meta.fields(RetKind)) |rf| {
+            inline for (type_info_compat.enumFields(RetKind)) |rf| {
                 if (r == @field(RetKind, rf.name)) {
                     const k0c = @field(Kind, kf.name);
                     const rc = @field(RetKind, rf.name);
@@ -302,11 +303,11 @@ fn fpPtr1(k0: Kind, r: RetKind, idx: usize) usize {
 
 /// FP-path fn-ptr for a 2-arg thunk of arg-kinds `k0`,`k1` + result `r` at slot `idx`.
 fn fpPtr2(k0: Kind, k1: Kind, r: RetKind, idx: usize) usize {
-    inline for (std.meta.fields(Kind)) |kf0| {
+    inline for (type_info_compat.enumFields(Kind)) |kf0| {
         if (k0 == @field(Kind, kf0.name)) {
-            inline for (std.meta.fields(Kind)) |kf1| {
+            inline for (type_info_compat.enumFields(Kind)) |kf1| {
                 if (k1 == @field(Kind, kf1.name)) {
-                    inline for (std.meta.fields(RetKind)) |rf| {
+                    inline for (type_info_compat.enumFields(RetKind)) |rf| {
                         if (r == @field(RetKind, rf.name)) {
                             const k0c = @field(Kind, kf0.name);
                             const k1c = @field(Kind, kf1.name);

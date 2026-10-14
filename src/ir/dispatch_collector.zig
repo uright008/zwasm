@@ -1,7 +1,7 @@
 //! Central comptime dispatch collector — Phase 9 substrate audit Q3 C
 //! adoption (per ADR-0023 §4.5 amend + ADR-0073, both Accepted 2026-05-19).
 //!
-//! This module is the **§9.12-A bootstrap** of the per-op file pattern:
+//! This module is the **§9.12-A bootstrap ** of the per-op file pattern:
 //!
 //!   `src/instruction/wasm_X_Y/<op>.zig` exports the canonical 5-axis
 //!   handler aggregate (`pub const handlers = .{...}`) plus the
@@ -24,6 +24,7 @@
 //! Zone 1 (`src/ir/`) — imports Zone 0 (`build_options`) + Zone 1.
 
 const std = @import("std");
+const type_info_compat = @import("../type_info_compat.zig");
 const build_options = @import("build_options");
 const zir = @import("zir.zig");
 
@@ -90,8 +91,8 @@ pub fn validateOpModule(comptime mod: type) void {
             @compileError("per-op file missing `pub const handlers = .{ .validate, .lower, .interp };`");
         }
         const H = @TypeOf(mod.handlers);
-        for (@typeInfo(IRAxis).@"enum".fields) |axis_field| {
-            if (!@hasField(H, axis_field.name)) {
+        for (@typeInfo(IRAxis).@"enum".field_names) |axis_field| {
+            if (!@hasField(H, axis_field)) {
                 @compileError("per-op file '" ++ @tagName(mod.op_tag) ++ "' missing handler `." ++ axis_field.name ++ "` in `pub const handlers`");
             }
         }
@@ -146,7 +147,7 @@ pub fn enabledByBuild(comptime mod: type) bool {
 // The validation at module top-level walks the tuple and runs
 // `validateOpModule(@TypeOf(op))` on each, emitting a `@compileError`
 // if any shape invariant is violated. This means **adding a malformed
-// per-op file fails the build immediately** — the substrate cannot
+// per-op file fails the build immediately ** — the substrate cannot
 // silently regress.
 // ---------------------------------------------------------------------
 
@@ -184,7 +185,7 @@ pub fn migratedOpCount() usize {
 
 /// Count of ZirOp tags (canonical authoritative number; ~581 at Phase 9).
 pub fn zirOpTagCount() usize {
-    return @typeInfo(ZirOp).@"enum".fields.len;
+    return @typeInfo(ZirOp).@"enum".field_names.len;
 }
 
 /// Whether the substrate migration is complete (= every ZirOp tag has
@@ -221,7 +222,7 @@ pub const DispatchError = error{
 /// Populate a `DispatchTable.interp` slot from each migrated op_mod
 /// whose `handlers.interp` matches the `dispatch_table.InterpFn`
 /// signature. Per ADR-0073 + `.dev/dispatcher_wire_design.md` §2.4:
-/// the interp axis is structurally **table-population** (function
+/// the interp axis is structurally **table-population ** (function
 /// pointer table indexed by ZirOp) rather than per-call switch.
 ///
 /// At §9.12-B / B6 this function is a no-op installer: i32_add and
@@ -498,7 +499,7 @@ test "populateDispatchTable is callable + no-op for current stubs" {
 }
 
 test "dispatcher returns a callable function value per IR-axis" {
-    inline for (@typeInfo(IRAxis).@"enum".fields) |f| {
+    inline for (@typeInfo(IRAxis).@"enum".field_names) |f| {
         const axis: IRAxis = @enumFromInt(f.value);
         const fn_ref = dispatcher(axis);
         _ = fn_ref;

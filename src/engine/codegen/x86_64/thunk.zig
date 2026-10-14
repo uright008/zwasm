@@ -3,20 +3,20 @@
 //! frame-link, ADR-0228 signature-aware bridge).
 //!
 //! Each thunk is a fixed-size native code snippet (`thunk_bytes`) that wraps
-//! a call-and-return around the callee's JIT entry. It: **(1)** establishes
+//! a call-and-return around the callee's JIT entry. It: **(1) ** establishes
 //! a standard `PUSH RBP; MOV RBP,RSP` frame so the cross-instance EH unwinder
 //! can walk THROUGH the thunk (D-238 — `[RBP,0]`=saved importer RBP,
 //! `[RBP,8]`=importer return address, making the thunk frame a chain link);
-//! **(2)** saves the caller's R15 (`runtime_ptr_save_gpr`) across the CALL;
-//! **(3)** copies the importer's overflow (stack) arguments into its own
+//! **(2) ** saves the caller's R15 (`runtime_ptr_save_gpr`) across the CALL;
+//! **(3) ** copies the importer's overflow (stack) arguments into its own
 //! outgoing area, so the callee finds them where its prologue looks
 //! (`emit.zig`: `[RBP + 16 + r15_save + 8*slot]`, i.e. directly above the
 //! frame of whoever CALLed it — which is this thunk, not the importer);
-//! **(4)** installs the callee's runtime in the slot the callee's signature
+//! **(4) ** installs the callee's runtime in the slot the callee's signature
 //! reserves for it — entry-arg0 normally, arg1 when the return is
 //! MEMORY-class and entry-arg0 carries the hidden result-buffer pointer the
-//! importer LEA'd (`op_call.zig:emitCall`); **(5)** clears and relays the
-//! callee's trap fields (#381); **(6)** keeps `CALL RAX` 16-byte aligned.
+//! importer LEA'd (`op_call.zig:emitCall`); **(5) ** clears and relays the
+//! callee's trap fields (#381); **(6) ** keeps `CALL RAX` 16-byte aligned.
 //! Mirrors the arm64 thunk (`arm64/thunk.zig`).
 //!
 //! Layout (`sh` = `shadow_space_bytes`: 0 SysV / 32 Win64; `n` = overflow
@@ -107,7 +107,7 @@
 //! sniff (`frame_chain.zig`). arm64 differs: its callee does not save the
 //! cohort, so its thunk must (`arm64/thunk.zig`, #413).
 //!
-//! **Cc-aware since #385.** Everything convention-dependent derives from the
+//! **Cc-aware since #385. ** Everything convention-dependent derives from the
 //! `abi.sysv` / `abi.win64` tables: the runtime register, the shadow size,
 //! and (through `computeCallOverflowBytesCc`) where the overflow begins.
 //! `emitThunkCc` takes the convention at comptime so the Win64 layout is
@@ -249,8 +249,8 @@ pub fn emitThunkCc(comptime cc: abi.Cc, buf: []u8, callee_rt: usize, callee_entr
 
 const testing = std.testing;
 
-const i32s = [_]zir.ValType{.i32} ** 12;
-const f64s = [_]zir.ValType{.f64} ** 12;
+const i32s = @as([12]zir.ValType, @splat(.i32));
+const f64s = @as([12]zir.ValType, @splat(.f64));
 const one = [_]zir.ValType{.i32};
 const three = [_]zir.ValType{ .i32, .i32, .i32 };
 
