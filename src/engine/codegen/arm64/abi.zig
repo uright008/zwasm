@@ -269,7 +269,7 @@ pub fn fpSlotToReg(slot_id: u16) ?Xn {
 /// load-then-overwrite pattern already covers them).
 const bulk_handler_reservation = [_]u16{ 0, 1, 2, 3, 4 };
 
-const zir_op_count = @typeInfo(zir.ZirOp).@"enum".fields.len;
+const zir_op_count = @typeInfo(zir.ZirOp).@"enum".field_names.len;
 
 /// Per-op scratch reservation lookup table (ADR-0077).
 ///

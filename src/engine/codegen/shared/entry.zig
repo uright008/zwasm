@@ -1444,6 +1444,11 @@ pub fn callI32f64NoArgs(
 ) Error!FuncRet_i32f64 {
     rt.trap_flag = 0;
     rt.trap_kind = 0;
+    // ADR-0202 D4 / ADR-0105 D1 — these inline-asm thunks bypass
+    // invokeAndCheck, so arm the fault handler and publish stack_limit here too;
+    // otherwise a guard-page fault on this path is a fatal signal, not a trap.
+    signal.ensureInstalled();
+    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1567,6 +1572,11 @@ pub fn callF64i32NoArgs(
 ) Error!FuncRet_f64i32 {
     rt.trap_flag = 0;
     rt.trap_kind = 0;
+    // ADR-0202 D4 / ADR-0105 D1 — these inline-asm thunks bypass
+    // invokeAndCheck, so arm the fault handler and publish stack_limit here too;
+    // otherwise a guard-page fault on this path is a fatal signal, not a trap.
+    signal.ensureInstalled();
+    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1695,6 +1705,11 @@ pub fn callF64f32NoArgs(
 ) Error!FuncRet_f64f32 {
     rt.trap_flag = 0;
     rt.trap_kind = 0;
+    // ADR-0202 D4 / ADR-0105 D1 — these inline-asm thunks bypass
+    // invokeAndCheck, so arm the fault handler and publish stack_limit here too;
+    // otherwise a guard-page fault on this path is a fatal signal, not a trap.
+    signal.ensureInstalled();
+    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);

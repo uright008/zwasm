@@ -692,7 +692,13 @@ fn mapDispatchErr(err: anyerror) Instance.InvokeError {
         error.OutOfHeap => error.OutOfMemory,
         // preview1 `proc_exit` or p2/p3 `wasi:cli/exit` — a clean unwind (#490).
         error.ProcExit => error.ProcExit,
-        else => @panic("zwasm.Instance.invoke: dispatch returned non-Trap error variant"),
+        // A guest can hand us a handle, pointer or resource-table state that
+        // the trampolines surface as an error variant not listed above. That is
+        // a guest fault and must become a trap; aborting the host on guest input
+        // is never acceptable for an embedder running untrusted plugins. Real
+        // host bugs still degrade to a binding error (trap_surface.zig maps
+        // HostTrap), which is strictly better than killing the process.
+        else => return error.HostTrap,
     };
 }
 

@@ -2079,3 +2079,22 @@ pub fn runWasiMain(engine: *Engine, alloc: Allocator, bytes: []const u8, host: *
     }
     return runWasiP2MainBuilt(&built);
 }
+
+test "D-445 / #519: a guest-supplied invalid pollable handle traps, it does not abort the host" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // A valid component (it passes component validation) whose only sin is
+    // calling `[method]pollable.ready(999)` with a handle that was never
+    // minted. Before the HostTrap safety net this reached mapDispatchErr's
+    // `else => @panic` and killed the process with SIGABRT.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/invalid_pollable.wasm", std.testing.allocator, .limited(1 << 20));
+    defer std.testing.allocator.free(bytes);
+
+    var eng = try Engine.init(std.testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(std.testing.allocator);
+    defer host.deinit();
+
+    try std.testing.expectError(error.HostTrap, runWasiP2Main(&eng, std.testing.allocator, bytes, &host, .{}));
+}

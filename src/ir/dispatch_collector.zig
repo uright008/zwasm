@@ -429,7 +429,7 @@ test "opModuleFor returns null for not-yet-migrated tags" {
 }
 
 test "IRAxis enum has exactly 3 variants per ADR-0074 (Zone 1 IR-axes only)" {
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(IRAxis).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 3), @typeInfo(IRAxis).@"enum".field_names.len);
 }
 
 test "dispatcherOver returns UnsupportedOpForBuildLevel for build-filtered op tag (Phase 10 prep)" {

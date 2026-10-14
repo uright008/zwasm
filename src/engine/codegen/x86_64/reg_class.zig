@@ -139,5 +139,5 @@ test "Xmm: low3 + extBit mirror Gpr" {
 }
 
 test "Width: 4 named variants" {
-    try testing.expectEqual(@as(u8, 4), @typeInfo(Width).@"enum".fields.len);
+    try testing.expectEqual(@as(u8, 4), @typeInfo(Width).@"enum".field_names.len);
 }

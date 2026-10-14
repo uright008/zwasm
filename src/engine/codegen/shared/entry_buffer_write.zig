@@ -41,6 +41,7 @@ const builtin = @import("builtin");
 
 const jit_abi = @import("jit_abi.zig");
 const stack_limit_mod = @import("../../../platform/stack_limit.zig");
+const signal = @import("../../../platform/signal.zig"); // ADR-0202 D4 fault-handler auto-install
 const entry = @import("entry.zig");
 
 pub const JitRuntime = jit_abi.JitRuntime;
@@ -83,6 +84,10 @@ pub fn invokeBufferWrite(
     args: [*]const u64,
     results: [*]u64,
 ) Error!void {
+    // ADR-0202 D4 — guard-page bounds elision turns an oob access into a
+    // hardware fault that the production handler redirects to the oob stub, so
+    // this path needs a handler armed exactly like entry.invokeAndCheck.
+    signal.ensureInstalled();
     rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     rt.trap_flag = 0;
     rt.trap_kind = 0;

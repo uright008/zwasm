@@ -988,7 +988,7 @@ test "D-307: errno → P2 filesystem error-code ordinals" {
     try testing.expectEqual(@as(u8, 27), @intFromEnum(P2ErrorCode.unsupported));
     try testing.expectEqual(@as(u8, 28), @intFromEnum(P2ErrorCode.no_tty));
     try testing.expectEqual(@as(u8, 36), @intFromEnum(P2ErrorCode.cross_device));
-    try testing.expectEqual(37, @typeInfo(P2ErrorCode).@"enum".fields.len);
+    try testing.expectEqual(37, @typeInfo(P2ErrorCode).@"enum".field_names.len);
     // Errnos with no P2 counterpart fall back to `io`.
     try testing.expectEqual(P2ErrorCode.io, errnoToP2ErrorCode(.connreset));
 }
