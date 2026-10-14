@@ -62,6 +62,8 @@ const jit_abi = @import("../shared/jit_abi.zig");
 const exception_table = @import("../shared/exception_table.zig");
 const trap_registry = @import("../../../platform/trap_registry.zig"); // ADR-0202 D3
 const build_options = @import("build_options");
+const decline_note = @import("../shared/decline_note.zig");
+const stack_limit_mod = @import("../../../platform/stack_limit.zig");
 
 /// EH / tail-call / func-references ops (Wasm 3.0) are dispatched manually here
 /// (not via dispatch_collector, which is build-level-DCE'd) because arm64 EmitCtx
@@ -293,6 +295,14 @@ pub fn compile(
     const spill_base_off: u32 = local_base_off + locals_bytes;
     const frame_bytes_unaligned: u32 = outgoing_max_bytes + locals_bytes + spill_bytes + indirect_result_slot_bytes;
     const frame_bytes: u32 = (frame_bytes_unaligned + 15) & ~@as(u32, 15);
+    // ADR-0105 D1 / #495 — same bound as the x86_64 emitter: the prologue
+    // probe runs before SP is lowered, so a frame larger than the guard
+    // headroom can step over the probe and the guard page in one SUB SP, and
+    // the resulting stack fault is not a classified trap. Decline instead.
+    if (@as(usize, frame_bytes) > stack_limit_mod.STACK_GUARD_HEADROOM) {
+        decline_note.set("prologue", .{ .frame_bytes = frame_bytes });
+        return Error.UnsupportedOp;
+    }
     // ADR-0202 D3 — byte offset of this function's oob (kind=6) trap stub,
     // the PC-redirect target for guard faults. Set below when the stub is
     // emitted; stays no_stub for functions with no bounds-checked access.

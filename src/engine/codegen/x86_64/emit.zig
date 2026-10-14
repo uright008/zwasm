@@ -53,6 +53,8 @@ const inst = @import("inst.zig");
 const usage = @import("usage.zig");
 const abi = @import("abi.zig");
 const build_options = @import("build_options");
+const decline_note = @import("../shared/decline_note.zig");
+const stack_limit_mod = @import("../../../platform/stack_limit.zig");
 // D-231 — comptime build-level guard (arm64 parity, emit.zig:73). The
 // D-239 br_on_null cohort below is in the legacy switch (not the
 // dispatch_collector's comptime `enabledByBuild`), so it needs an explicit
@@ -303,6 +305,18 @@ pub fn compile(
         ((frame_unaligned + 7) & ~@as(u32, 15)) + 8
     else
         (frame_unaligned + 15) & ~@as(u32, 15);
+
+    // ADR-0105 D1 / #495: the prologue probe compares SP against
+    // stack_low + STACK_GUARD_HEADROOM *before* this frame is subtracted, so a
+    // frame larger than the headroom can step over both the probe limit and the
+    // OS guard page in one SUB RSP. The resulting fault lands on a stack
+    // address, which the signal handler does not classify, and the process
+    // exits with a fatal signal instead of trapping. Decline the function: the
+    // interpreter accounts for its own stack and traps cleanly.
+    if (@as(usize, frame_bytes) > stack_limit_mod.STACK_GUARD_HEADROOM) {
+        decline_note.set("prologue", .{ .frame_bytes = frame_bytes });
+        return Error.UnsupportedOp;
+    }
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);

@@ -27,6 +27,7 @@ const wasm_c_api = @import("../api/wasm.zig");
 const trap_surface = @import("../api/trap_surface.zig");
 const diagnostic = @import("../diagnostic/diagnostic.zig");
 const decline_note = @import("../engine/codegen/shared/decline_note.zig");
+const stack_limit = @import("../platform/stack_limit.zig");
 const wasi_host = @import("../wasi/host.zig");
 const invoke_args_mod = @import("invoke_args.zig");
 const export_lookup = @import("../engine/export_lookup.zig");
@@ -317,6 +318,7 @@ fn reportDecline(note: decline_note.Note) void {
         .overflow_words => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} overflow argument word{s}" ++ tail, .{ note.op, n, if (n == 1) "" else "s" }),
         .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries" ++ tail, .{ note.op, n }),
         .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee" ++ tail, .{ note.op, n }),
+        .frame_bytes => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}`: a {d}-byte frame is larger than the {d}-byte stack-guard headroom, so the prologue probe could be stepped over and a stack fault would kill the process instead of trapping (#495)" ++ tail, .{ note.op, n, stack_limit.STACK_GUARD_HEADROOM }),
     }
 }
 

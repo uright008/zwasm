@@ -29,6 +29,9 @@ pub const Reason = union(enum) {
     simd_args: u32,
     /// The callee's result count, above the 2 that return in registers.
     memory_class_results: u32,
+    /// The function's own frame, larger than the stack-guard headroom the
+    /// prologue probe leaves below `stack_limit` (#495).
+    frame_bytes: u32,
 };
 
 pub const Note = struct {
