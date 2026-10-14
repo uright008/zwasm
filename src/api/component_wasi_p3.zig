@@ -11,7 +11,6 @@
 //! async.zig` (Zone 1, ADR-0187); this is the thin engine-wiring layer.
 
 const std = @import("std");
-const net_io = @import("../io_net_compat.zig");
 
 const async_mod = @import("../feature/component/async.zig");
 const net = std.Io.net;
@@ -995,8 +994,10 @@ const ExternalClient = struct {
             },
             .send => {
                 const s = self.stream orelse return false;
-                const data = [_][]const u8{self.ops[self.next].payload};
-                _ = net_io.write(self.io, s.socket.handle, data) catch return false;
+                var wbuf: [512]u8 = undefined;
+                var w = s.writer(self.io, &wbuf);
+                w.interface.writeAll(self.ops[self.next].payload) catch return false;
+                w.interface.flush() catch return false;
                 self.next += 1;
                 return true;
             },
@@ -1050,7 +1051,7 @@ const EchoEndpoint = struct {
         var head_end: usize = 0;
         while (head_end == 0) {
             var bufs = [_][]u8{buf[n..]};
-            const got = net_io.read(io, conn.socket.handle, &bufs) catch return;
+            const got = conn.read(io, &bufs) catch return;
             if (got == 0) return;
             n += got;
             if (std.mem.find(u8, buf[0..n], "\r\n\r\n")) |p| head_end = p + 4;
@@ -1065,15 +1066,17 @@ const EchoEndpoint = struct {
         }
         while (n - head_end < content_len) {
             var bufs = [_][]u8{buf[n..]};
-            const got = net_io.read(io, conn.socket.handle, &bufs) catch return;
+            const got = conn.read(io, &bufs) catch return;
             if (got == 0) break;
             n += got;
         }
         const body = buf[head_end..n];
         var out: [66000]u8 = undefined;
         const resp = std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
-        const data = [_][]const u8{resp};
-        _ = net_io.write(io, conn.socket.handle, data) catch return;
+        var wbuf: [512]u8 = undefined;
+        var w = conn.writer(io, &wbuf);
+        w.interface.writeAll(resp) catch return;
+        w.interface.flush() catch return;
     }
 
     fn stop(self: *EchoEndpoint) void {
@@ -1336,7 +1339,7 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
             var got: usize = 0;
             while (got < buf.len) {
                 var bufs = [_][]u8{buf[got..]};
-                const n = try net_io.read(io, s.socket.handle, &bufs);
+                const n = try s.read(io, &bufs);
                 if (n == 0) break;
                 got += n;
             }

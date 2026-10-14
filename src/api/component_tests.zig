@@ -4,7 +4,6 @@
 //! test-isolation; mirrors `validator_tests.zig`). The impl file stays lean.
 
 const std = @import("std");
-const net_io = @import("../io_net_compat.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -1510,11 +1509,13 @@ fn tcpEchoServerOnce(io: std.Io, server: *std.Io.net.Server) void {
     defer conn.close(io);
     var buf: [16]u8 = undefined;
     var bufs = [_][]u8{&buf};
-    const n = net_io.read(io, conn.socket.handle, &bufs) catch return;
+    const n = conn.read(io, &bufs) catch return;
     var reply_buf: [32]u8 = undefined;
     const reply = std.fmt.bufPrint(&reply_buf, "pong-{s}", .{buf[0..n]}) catch return;
-    const data = [_][]const u8{reply};
-    _ = net_io.writeVec(io, conn.socket.handle, &data) catch return;
+    var wbuf: [64]u8 = undefined;
+    var w = conn.writer(io, &wbuf);
+    w.interface.writeAll(reply) catch return;
+    w.interface.flush() catch return;
 }
 
 test "ADR-0180: a real rust wasip2 TCP client connects + echoes through wasi:sockets" {
@@ -1564,14 +1565,16 @@ fn tcpClientOnce(io: std.Io, port: u16) void {
         }
     } else return;
     defer stream.close(io);
-    const data = [_][]const u8{"ping"};
-    _ = net_io.writeVec(io, stream.socket.handle, &data) catch return;
+    var wbuf: [64]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    w.interface.writeAll("ping") catch return;
+    w.interface.flush() catch return;
     // Read until the guest's full "ping-ack" reply arrived (2 writes).
     var buf: [16]u8 = undefined;
     var total: usize = 0;
     while (total < 8) {
         var bufs = [_][]u8{buf[total..]};
-        const n = net_io.read(io, stream.socket.handle, &bufs) catch return;
+        const n = stream.read(io, &bufs) catch return;
         if (n == 0) return;
         total += n;
     }

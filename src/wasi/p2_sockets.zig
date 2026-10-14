@@ -35,7 +35,6 @@
 //! libc surface (`libc_boundary`).
 
 const std = @import("std");
-const net_io = @import("../io_net_compat.zig");
 const builtin = @import("builtin");
 const posix = std.posix;
 const net = std.Io.net;
@@ -422,15 +421,18 @@ pub const TcpSocket = struct {
     pub fn recv(self: *TcpSocket, io: std.Io, buf: []u8) !usize {
         const stream = self.connectedStream() orelse return error.InvalidState;
         var bufs = [_][]u8{buf};
-        return net_io.read(io, stream.socket.handle, &bufs);
+        return stream.read(io, &bufs);
     }
 
     /// Socket-backed output-stream `write` (one-shot).
     pub fn send(self: *TcpSocket, io: std.Io, bytes: []const u8) !usize {
         const stream = self.connectedStream() orelse return error.InvalidState;
         if (builtin.os.tag == .windows) return winAfdSend(stream.socket.handle, bytes);
-        const data = [_][]const u8{bytes};
-        return net_io.writeVec(io, stream.socket.handle, &data);
+        var wbuf: [1024]u8 = undefined;
+        var w = stream.writer(io, &wbuf);
+        try w.interface.writeAll(bytes);
+        try w.interface.flush();
+        return bytes.len;
     }
 
     /// Readiness for the poll(2)-honest pollable (ADR-0180): is the
@@ -572,8 +574,11 @@ pub const UdpSocket = struct {
         };
         if (bytes.len > max_payload) return error.MessageOversize;
         if (self.os_connected) {
-            const data = [_][]const u8{bytes};
-            _ = try net_io.writeVec(io, self.socket.?.handle, &data);
+            const stream: net.Stream = .{ .socket = self.socket.? };
+            var wbuf: [1024]u8 = undefined;
+            var w = stream.writer(io, &wbuf);
+            try w.interface.writeAll(bytes);
+            try w.interface.flush();
             return;
         }
         try self.ensureBound(io);
@@ -1069,12 +1074,15 @@ test "tcp client lifecycle: create → connect → echo against a loopback liste
     try testing.expectEqual(@as(usize, 4), try client.send(io, "ping"));
     var srv_buf: [16]u8 = undefined;
     var srv_bufs = [_][]u8{&srv_buf};
-    const got = try net_io.read(io, conn.socket.handle, &srv_bufs);
+    const conn_stream: net.Stream = .{ .socket = conn.socket };
+    const got = try conn_stream.read(io, &srv_bufs);
     try testing.expectEqualStrings("ping", srv_buf[0..got]);
 
     // server → client; readiness flips the client's POLL.IN pollable.
-    const reply = [_][]const u8{"pong"};
-    _ = try net_io.writeVec(io, conn.socket.handle, &reply);
+    var rbuf: [64]u8 = undefined;
+    var rw = conn_stream.writer(io, &rbuf);
+    try rw.interface.writeAll("pong");
+    try rw.interface.flush();
     var attempts: u32 = 0;
     while (!(try client.ready(POLL_IN)) and attempts < 500) : (attempts += 1) {
         try io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake);
