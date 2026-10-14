@@ -143,7 +143,9 @@ pub const ComponentInstance = struct {
         result_type: ?PrimValType,
         out: *canon.Value,
     ) InvokeFlatError!void {
-        std.debug.assert(args.len == arg_types.len);
+        // A host-side caller can get this wrong; a process abort is not a
+        // useful answer. ArgArityMismatch comes from Instance.InvokeError.
+        if (args.len != arg_types.len) return error.ArgArityMismatch;
         if (args.len > MAX_FLAT_PARAMS) return InvokeFlatError.TooManyParams;
 
         var argbuf: [MAX_FLAT_PARAMS]Value = undefined;

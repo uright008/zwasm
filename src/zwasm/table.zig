@@ -31,7 +31,7 @@ pub const Table = struct {
         jit: *_runner.JitInstance,
     };
 
-    pub const Error = error{ OutOfBounds, GrowFailed };
+    pub const Error = error{ OutOfBounds, GrowFailed, UnsupportedFuncrefMirror };
 
     /// Wasm spec §4.4.7 (table.size) — current slot count.
     pub fn size(self: Table) u32 {
@@ -77,8 +77,10 @@ pub const Table = struct {
                 // mirror (ADR-0068) the guest `table.set` op keeps in sync; the host
                 // cannot synthesise that native entry from an encoded funcref here.
                 // externref tables have no mirror (zero sentinel) → safe to write.
-                if (@intFromPtr(ts.funcptrs) != 0)
-                    @panic("Table.set on a JIT funcref table needs the funcptrs mirror (D-478)");
+                // The host cannot synthesise the JIT native entry from an
+                // encoded funcref, so this is a host-API limitation, not a
+                // reason to abort the embedder's process.
+                if (@intFromPtr(ts.funcptrs) != 0) return error.UnsupportedFuncrefMirror;
                 ts.refs[idx] = _vc.zwasmToRuntime(val).ref;
             },
         }
