@@ -1479,6 +1479,21 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .fs_dir_entry_stream_read => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DirEntryStreamReadEntry, mapGuestFault),
         .fs_dir_entry_stream_drop => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop, mapGuestFault),
         .io_resource_drop => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop, mapGuestFault),
+        .http_p2_fields_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpFieldsNew, mapGuestFault),
+        .http_p2_reqopts_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpRequestOptionsNew, mapGuestFault),
+        .http_p2_reqopts_connect_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetConnectTimeout, mapGuestFault),
+        .http_p2_reqopts_first_byte_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetFirstByteTimeout, mapGuestFault),
+        .http_p2_reqopts_between_bytes_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetBetweenBytesTimeout, mapGuestFault),
+        .http_p2_outgoing_request_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestNew, mapGuestFault),
+        .http_p2_outgoing_request_set_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetScheme, mapGuestFault),
+        .http_p2_outgoing_request_set_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetAuthority, mapGuestFault),
+        .http_p2_outgoing_request_set_path_with_query => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetPathWithQuery, mapGuestFault),
+        .http_p2_incoming_response_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseStatus, mapGuestFault),
+        .http_p2_incoming_response_consume => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingResponseConsume, mapGuestFault),
+        .http_p2_incoming_body_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingBodyStream, mapGuestFault),
+        .http_p2_future_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureGet, mapGuestFault),
+        .http_p2_future_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureSubscribe, mapGuestFault),
+        .http_p2_handle => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingHandlerHandle, mapGuestFault),
         // The wasi:{filesystem,sockets,http}@0.3.0 arms live with the P3 host
         // layer (ADR-0207 registerP3Arms); listing the tags here keeps the
         // switch compile-time exhaustive — a new P3 op fails HERE, loudly.

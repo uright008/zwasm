@@ -80,6 +80,25 @@ pub const PendingClientSend = struct {
     body_shared: ?u32 = null,
 };
 
+/// One p2 HTTP exchange: the response status plus the body bytes, served to
+/// the guest through the body `input-stream`.
+pub const HttpP2Exchange = struct {
+    status: u16 = 0,
+    body: []u8 = &.{},
+    body_pos: usize = 0,
+    /// `[method]incoming-body.stream` mints the reader once (the WIT says the
+    /// call consumes the body).
+    stream_taken: bool = false,
+    /// `[method]future-incoming-response.get` hands the response out once; the
+    /// outer `result` of the triple-nested return is `err` on later calls.
+    retrieved: bool = false,
+
+    pub fn deinit(self: *HttpP2Exchange, alloc: std.mem.Allocator) void {
+        if (self.body.len != 0) alloc.free(self.body);
+        self.body = &.{};
+    }
+};
+
 pub const WasiP2Ctx = struct {
     host: *wasi_host.Host,
     /// One handle table keyed by resource-type id; each P2 resource the host
@@ -184,6 +203,13 @@ pub const WasiP2Ctx = struct {
     /// a HTTP_FIELDS_RT handle's rep indexes this list. Dropped entries are
     /// deinit'ed in place (slot stays; reps are never reused).
     http_fields: std.ArrayList(p3http.HttpFields) = .empty,
+
+    /// p2 `wasi:http` `outgoing-request` resources (rep = index).
+    http_p2_requests: std.ArrayList(p3http.HttpRequest) = .empty,
+    /// p2 exchanges (rep = index), shared by the future / response / body /
+    /// body-stream handles. The transport buffers the body eagerly in this
+    /// slice, so the socket is already closed by the time the guest reads.
+    http_p2_exchanges: std.ArrayList(HttpP2Exchange) = .empty,
     http_requests: std.ArrayList(p3http.HttpRequest) = .empty,
     http_responses: std.ArrayList(p3http.HttpResponse) = .empty,
     http_reqopts: std.ArrayList(p3http.HttpRequestOptions) = .empty,
@@ -287,6 +313,14 @@ pub const WasiP2Ctx = struct {
     /// byte is queued or stdin has ended (`wasi_fd.stdinReady`). Rep unused.
     pub const STDIN_POLLABLE_RT: u32 = 19;
 
+    // wasi:http@0.2.x handles (snooze fork). All four exchange-backed
+    // resources share one rep: the index into `http_p2_exchanges`.
+    pub const HTTP_P2_OUTGOING_REQUEST_RT: u32 = 20;
+    pub const HTTP_P2_FUTURE_RT: u32 = 21;
+    pub const HTTP_P2_RESPONSE_RT: u32 = 22;
+    pub const HTTP_P2_BODY_RT: u32 = 23;
+    pub const HTTP_P2_BODY_STREAM_RT: u32 = 24;
+
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.
     pub const DirStream = struct { fd: wasi_p1.Fd, cookie: u64 };
@@ -342,6 +376,10 @@ pub const WasiP2Ctx = struct {
         self.udp_sockets.deinit(self.alloc);
         for (self.http_fields.items) |*f| f.deinit(self.alloc);
         self.http_fields.deinit(self.alloc);
+        for (self.http_p2_requests.items) |*r| r.deinit(self.alloc);
+        self.http_p2_requests.deinit(self.alloc);
+        for (self.http_p2_exchanges.items) |*e| e.deinit(self.alloc);
+        self.http_p2_exchanges.deinit(self.alloc);
         for (self.http_requests.items) |*r| r.deinit(self.alloc);
         self.http_requests.deinit(self.alloc);
         self.http_responses.deinit(self.alloc);

@@ -286,6 +286,26 @@ pub const P2Op = enum {
     sock3_udp_sndbuf_set,
     sock3_resolve_addresses,
     // wasi:http/types@0.3.0 (ADR-0205 phase D): the `fields` resource.
+    // wasi:http@0.2.x (`wasi:http/types` + `outgoing-handler`) — the p2 names
+    // differ from 0.3's (`outgoing-request`/`incoming-response`/`handle`), so
+    // they get their own ops; the five that share a name with a 0.3 row are
+    // registered per-generation (see component_wasi_p2_http.zig).
+    // p2 counterparts of rows that 0.2/0.3 share by name (see Entry.op_p2).
+    http_p2_fields_new,
+    http_p2_reqopts_new,
+    http_p2_reqopts_connect_set,
+    http_p2_reqopts_first_byte_set,
+    http_p2_reqopts_between_bytes_set,
+    http_p2_outgoing_request_new,
+    http_p2_outgoing_request_set_scheme,
+    http_p2_outgoing_request_set_authority,
+    http_p2_outgoing_request_set_path_with_query,
+    http_p2_incoming_response_status,
+    http_p2_incoming_response_consume,
+    http_p2_incoming_body_stream,
+    http_p2_future_get,
+    http_p2_future_subscribe,
+    http_p2_handle,
     http3_fields_new,
     http3_fields_from_list,
     http3_fields_get,
@@ -503,6 +523,22 @@ pub fn p1Target(op: P2Op) P1Target {
         .sock_stub_recv,
         .sock_stub_send,
         .sock_stub_subscribe,
+        // wasi:http@0.2.x (snooze fork): host-backed by std.http, no P1 row.
+        .http_p2_fields_new,
+        .http_p2_reqopts_new,
+        .http_p2_reqopts_connect_set,
+        .http_p2_reqopts_first_byte_set,
+        .http_p2_reqopts_between_bytes_set,
+        .http_p2_outgoing_request_new,
+        .http_p2_outgoing_request_set_scheme,
+        .http_p2_outgoing_request_set_authority,
+        .http_p2_outgoing_request_set_path_with_query,
+        .http_p2_incoming_response_status,
+        .http_p2_incoming_response_consume,
+        .http_p2_incoming_body_stream,
+        .http_p2_future_get,
+        .http_p2_future_subscribe,
+        .http_p2_handle,
         => .sockets_host,
         // wasi:filesystem@0.3.0 (ADR-0205 phase B): bound directly to the fs3
         // trampolines (async-eager / host stream peers), not via a P1Target row.
@@ -635,7 +671,18 @@ pub fn isWasiP2Interface(interface: []const u8) bool {
     return std.mem.startsWith(u8, interface, "wasi:");
 }
 
-const Entry = struct { iface: []const u8, func: []const u8, op: P2Op, gens: Gens = .{} };
+const Entry = struct {
+    iface: []const u8,
+    func: []const u8,
+    op: P2Op,
+    gens: Gens = .{},
+    /// A row that both generations share by NAME may still need a different op
+    /// per generation, because the WIT error type (and so the flattened core
+    /// signature) differs: 0.2's `result<_, ()>` returns its discriminant in a
+    /// register, 0.3's payload-carrying error takes a retptr. When set, a p2
+    /// component classifies to this op instead.
+    op_p2: ?P2Op = null,
+};
 
 /// The P2 (interface, func) → `P2Op` table (CLI subset). Method names follow
 /// the WIT canonical encoding `[method]output-stream.write` etc.; we match the
@@ -848,8 +895,21 @@ const table = [_]Entry{
     .{ .iface = "wasi:sockets/types", .func = "[method]udp-socket.set-send-buffer-size", .op = .sock3_udp_sndbuf_set, .gens = p3_only },
     .{ .iface = "wasi:sockets/types", .func = "[resource-drop]udp-socket", .op = .io_resource_drop, .gens = p3_only },
     .{ .iface = "wasi:sockets/ip-name-lookup", .func = "resolve-addresses", .op = .sock3_resolve_addresses, .gens = p3_only },
+    // wasi:http@0.2.x client rows. The guest surface here is exactly what a
+    // real p2 client (wasip2 + wasi:http) imports for a request whose response
+    // body is read as a stream.
+    .{ .iface = "wasi:http/types", .func = "[constructor]outgoing-request", .op = .http_p2_outgoing_request_new, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-scheme", .op = .http_p2_outgoing_request_set_scheme, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-authority", .op = .http_p2_outgoing_request_set_authority, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-path-with-query", .op = .http_p2_outgoing_request_set_path_with_query, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-response.status", .op = .http_p2_incoming_response_status, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-response.consume", .op = .http_p2_incoming_response_consume, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-body.stream", .op = .http_p2_incoming_body_stream, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]future-incoming-response.get", .op = .http_p2_future_get, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]future-incoming-response.subscribe", .op = .http_p2_future_subscribe, .gens = p2_only },
+    .{ .iface = "wasi:http/outgoing-handler", .func = "handle", .op = .http_p2_handle, .gens = p2_only },
     // wasi:http/types@0.3.0 rows (ADR-0205 phase D) — the `fields` resource.
-    .{ .iface = "wasi:http/types", .func = "[constructor]fields", .op = .http3_fields_new, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[constructor]fields", .op = .http3_fields_new, .gens = .{}, .op_p2 = .http_p2_fields_new },
     .{ .iface = "wasi:http/types", .func = "[static]fields.from-list", .op = .http3_fields_from_list, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]fields.get", .op = .http3_fields_get, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]fields.has", .op = .http3_fields_has, .gens = p3_only },
@@ -878,13 +938,13 @@ const table = [_]Entry{
     .{ .iface = "wasi:http/types", .func = "[method]response.set-status-code", .op = .http3_response_set_status, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]response.get-headers", .op = .http3_response_get_headers, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[resource-drop]response", .op = .io_resource_drop, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[constructor]request-options", .op = .http3_reqopts_new, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[constructor]request-options", .op = .http3_reqopts_new, .gens = .{}, .op_p2 = .http_p2_reqopts_new },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.get-connect-timeout", .op = .http3_reqopts_connect_get, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-connect-timeout", .op = .http3_reqopts_connect_set, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-connect-timeout", .op = .http3_reqopts_connect_set, .gens = .{}, .op_p2 = .http_p2_reqopts_connect_set },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.get-first-byte-timeout", .op = .http3_reqopts_first_byte_get, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-first-byte-timeout", .op = .http3_reqopts_first_byte_set, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-first-byte-timeout", .op = .http3_reqopts_first_byte_set, .gens = .{}, .op_p2 = .http_p2_reqopts_first_byte_set },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.get-between-bytes-timeout", .op = .http3_reqopts_between_bytes_get, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-between-bytes-timeout", .op = .http3_reqopts_between_bytes_set, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-between-bytes-timeout", .op = .http3_reqopts_between_bytes_set, .gens = .{}, .op_p2 = .http_p2_reqopts_between_bytes_set },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.clone", .op = .http3_reqopts_clone, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[resource-drop]request-options", .op = .io_resource_drop, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[static]response.consume-body", .op = .http3_response_consume_body, .gens = p3_only },
@@ -903,7 +963,11 @@ pub fn classifyImport(interface: []const u8, func: []const u8, gen: Gen) ?P2Op {
             .p2 => e.gens.p2,
             .p3 => e.gens.p3,
         };
-        if (ok) return e.op;
+        if (!ok) continue;
+        if (gen == .p2) {
+            if (e.op_p2) |op| return op;
+        }
+        return e.op;
     }
     return null;
 }

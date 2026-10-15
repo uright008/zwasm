@@ -2095,3 +2095,80 @@ test "ADR-0205 A: official wasip3 binary decodes the async-support canon builtin
     // wait-until + wait-for are the two async-lowered host imports.
     try testing.expectEqual(@as(usize, 2), async_lowers);
 }
+
+/// One-shot loopback HTTP server for the p2 http e2e: accept a connection,
+/// read the request head, answer with a fixed body, close.
+fn httpOnceServer(io: std.Io, server: *std.Io.net.Server) void {
+    var conn = server.accept(io) catch return;
+    defer conn.close(io);
+    var buf: [2048]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        var bufs = [_][]u8{buf[n..]};
+        const got = conn.read(io, &bufs) catch return;
+        if (got == 0) break;
+        n += got;
+        if (std.mem.find(u8, buf[0..n], "\r\n\r\n") != null) break;
+    }
+    const body = "hello-http";
+    var out: [256]u8 = undefined;
+    const resp = std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
+    var wbuf: [512]u8 = undefined;
+    var w = conn.writer(io, &wbuf);
+    w.interface.writeAll(resp) catch return;
+    w.interface.flush() catch return;
+}
+
+test "wasi:http@0.2.x: a real wasip2 client GETs from a loopback server" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_p2_client.wasm", testing.allocator, .limited(1 << 22));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var server_fut = try io.concurrent(httpOnceServer, .{ io, &server });
+    defer server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var guest_err: std.ArrayList(u8) = .empty;
+    defer guest_err.deinit(testing.allocator);
+    host.stderr_buffer = &guest_err;
+
+    // Before the p2 http arms this failed to link (UnsupportedWasiImport).
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/x", .{port});
+    defer testing.allocator.free(url);
+
+    // The guest exports `snooze:direct-http/api` as an instance export; typed
+    // invoke addresses it as `<interface>#<func>`.
+    const open_name = "snooze:direct-http/api@0.1.0#open";
+    const status_val = opened.invokeTyped(open_name, &.{.{ .string = url }}, testing.allocator) catch |e| {
+        std.debug.print("[guest stderr] {s}\n", .{guest_err.items});
+        return e;
+    };
+    const status = status_val.?;
+    defer status.deinit(testing.allocator);
+    try testing.expect(status == .result and status.result.is_ok);
+    try testing.expectEqual(@as(u16, 200), status.result.payload.?.u16);
+
+    const body = (try opened.invokeTyped("snooze:direct-http/api@0.1.0#read", &.{.{ .u64 = 64 }}, testing.allocator)).?;
+    defer body.deinit(testing.allocator);
+    try testing.expect(body == .result and body.result.is_ok);
+    const list = body.result.payload.?.list;
+    var got: [64]u8 = undefined;
+    for (list, 0..) |v, i| got[i] = v.u8;
+    try testing.expectEqualStrings("hello-http", got[0..list.len]);
+
+    // `close` returns nothing, so invokeTyped yields null here.
+    _ = try opened.invokeTyped("snooze:direct-http/api@0.1.0#close", &.{}, testing.allocator);
+}
