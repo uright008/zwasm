@@ -2071,6 +2071,10 @@ pub fn runWasiP2Main(engine: *Engine, alloc: Allocator, bytes: []const u8, host:
 /// invoke the first `canon lift` export. Split out so the unified
 /// `runWasiMain` dispatcher (P3) can reuse it after building once.
 pub fn runWasiP2MainBuilt(built: *BuiltComponent) anyerror!void {
+    // Same admission gate as the typed path: a retiring instance refuses to
+    // start a new `wasi:cli/run`.
+    try built.ctx.host.enterCall();
+    defer built.ctx.host.leaveCall();
     const run_ref = firstLiftCoreExport(&built.info) orelse return error.NoRunExport;
     const main_inst = built.guestInstance(run_ref.instance) orelse return error.NoRunExport;
     var results = [_]Value{.{ .i32 = 0 }};

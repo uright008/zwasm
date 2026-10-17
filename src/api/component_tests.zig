@@ -2481,3 +2481,63 @@ test "host seam: embedder-registered imports bind, and admission can refuse them
     host.admission_fn = denyEveryImport;
     try testing.expectError(error.ImportDenied, component.open(&eng, testing.allocator, bytes, &host, .{}));
 }
+
+test "unload barrier: beginClose refuses new calls, cancel unblocks, drain reaches zero" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_p2_client.wasm", testing.allocator, .limited(1 << 22));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var server_fut = try io.concurrent(stalledBodyServer, .{ io, &server });
+    defer _ = server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    // Destroyed explicitly at the barrier, not deferred: the final assertion is
+    // about what the destruction leaves behind.
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    errdefer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/x", .{port});
+    defer testing.allocator.free(url);
+
+    // One guest call runs on a worker thread and blocks reading a body that
+    // never arrives.
+    var outcome: ReadOutcome = .{};
+    var worker = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, openThenReadInBackground, .{ &opened, url, &outcome });
+    var waited_ms: usize = 0;
+    while (!outcome.opened_ok.load(.acquire) and waited_ms < 2000) : (waited_ms += 10) {
+        io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+    }
+    try testing.expect(outcome.opened_ok.load(.acquire));
+    io.sleep(.{ .nanoseconds = 150 * std.time.ns_per_ms }, .awake) catch {};
+    try testing.expectEqual(@as(u32, 1), host.inFlight());
+
+    // 1. close admission: a new call is refused ...
+    host.beginClose();
+    try testing.expectError(error.InstanceClosing, opened.invokeTyped("snooze:direct-http/api@0.1.0#open", &.{.{ .string = url }}, testing.allocator));
+
+    // 2. ... cancel the blocked IO, then drain: this returns only once the
+    // in-flight call has actually left, which is the barrier the unload needs.
+    host.cancelHttp();
+    try testing.expect(host.drain(io, 2 * std.time.ns_per_s));
+    try testing.expectEqual(@as(u32, 0), host.inFlight());
+
+    worker.join();
+    try testing.expect(outcome.finished.load(.acquire));
+    try testing.expect(outcome.trapped); // the cancelled read failed the call
+
+    // 3. Only after the barrier may the component be destroyed; then there is
+    // nothing left for a canceller to reach.
+    opened.deinit();
+    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+}

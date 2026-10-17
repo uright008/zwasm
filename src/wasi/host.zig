@@ -210,6 +210,15 @@ pub const Host = struct {
     admission_fn: ?AdmissionFn = null,
     admission_data: ?*anyopaque = null,
 
+    /// In-flight guest calls and the admission flag (snooze fork). The unload
+    /// protocol is: `beginClose` (refuse new calls) -> cancel in-flight host IO
+    /// (`cancelHttp`) -> `drain` (wait for the count to reach zero) -> destroy
+    /// the component. Nothing may touch the component's userdata after drain
+    /// reports true.
+    calls_in_flight: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+
     pub const HostImport = struct {
         /// Interface name as it appears in the component (version stripped),
         /// e.g. "snooze:host/probe".
@@ -236,6 +245,46 @@ pub const Host = struct {
     pub fn admit(self: *const Host, iface: []const u8, func: []const u8) bool {
         const f = self.admission_fn orelse return true;
         return f(self.admission_data, iface, func);
+    }
+
+    /// Admit a guest call. Every entry point pairs this with `leaveCall`.
+    pub fn enterCall(self: *Host) error{InstanceClosing}!void {
+        if (self.closing.load(.acquire)) return error.InstanceClosing;
+        _ = self.calls_in_flight.fetchAdd(1, .acq_rel);
+        // A close that started between the check and the increment must not be
+        // missed: re-check and back out.
+        if (self.closing.load(.acquire)) {
+            _ = self.calls_in_flight.fetchSub(1, .acq_rel);
+            return error.InstanceClosing;
+        }
+    }
+
+    pub fn leaveCall(self: *Host) void {
+        _ = self.calls_in_flight.fetchSub(1, .acq_rel);
+    }
+
+    /// Refuse new calls. Idempotent.
+    pub fn beginClose(self: *Host) void {
+        self.closing.store(true, .release);
+    }
+
+    /// Calls currently executing on this instance.
+    pub fn inFlight(self: *const Host) u32 {
+        return self.calls_in_flight.load(.acquire);
+    }
+
+    /// Wait until no call is in flight, up to `timeout_ns`. Callers must have
+    /// called `beginClose` and cancelled blocked host IO first, otherwise a
+    /// blocked call never finishes and this reports false.
+    pub fn drain(self: *Host, io: std.Io, timeout_ns: u64) bool {
+        var waited: u64 = 0;
+        const step_ns: u64 = 2 * std.time.ns_per_ms;
+        while (self.inFlight() != 0) {
+            if (waited >= timeout_ns) return false;
+            io.sleep(.{ .nanoseconds = step_ns }, .awake) catch return self.inFlight() == 0;
+            waited += step_ns;
+        }
+        return true;
     }
 
     /// Cancel the live p2 http transfer, if any. Safe to call from any thread;

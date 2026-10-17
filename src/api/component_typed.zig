@@ -35,6 +35,9 @@ pub const InvokeTypedError = error{
     /// A value's shape does not match the export's WIT type (wrong union
     /// arm, record arity, variant case range, ...).
     ValueShapeMismatch,
+    /// The host closed admission for this instance (unload/retire in
+    /// progress): no new guest call may start.
+    InstanceClosing,
 } || canon.TypeBridgeError || canon.LowerFlatError || canon.LiftFlatError || canon.LoadError ||
     Instance.InvokeError || CanonContextError || std.mem.Allocator.Error;
 

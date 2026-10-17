@@ -294,6 +294,12 @@ pub fn invokeTypedBuilt(
     args: []const ComponentValue,
     out_alloc: std.mem.Allocator,
 ) InvokeTypedError!?ComponentValue {
+    // Admission gate: a retiring instance refuses new calls, and every call is
+    // counted so the owner can drain before destroying anything.
+    const host = built.ctx.host;
+    try host.enterCall();
+    defer host.leaveCall();
+
     const info = &built.info;
     const ft = info.resolveFuncType(export_name) orelse return diagUnresolved(export_name);
     const r = info.resolveLiftedFunc(export_name) orelse return diagUnresolved(export_name);
