@@ -2,6 +2,7 @@
 
 上游：<https://github.com/zwasm/zwasm>
 基线提交：`442f746a63c517d2545697aa174d9394f88086f7`（v2.7.0 之后、`#512` 修复）
+**已 rebase 到上游 main `e63382423`（2026-10-17，8 个提交）**；rebase 本身零冲突，代价是移植上游新代码的 4 处 0.18 差异（见下 `p7`）。
 工作分支：`zig-0.18-port`（fork remote：`fork` = https://github.com/uright008/zwasm）
 工具链：Zig `0.18.0-dev.210+3626a240e`（上游要求 0.16；本 fork 已迁到 0.18-dev）
 
@@ -21,6 +22,7 @@
 | p3e | `safety: two reachable aborts become typed errors` | `invokeFlat` 的 arity assert → `error.ArgArityMismatch`；`Table.set` 的 JIT funcref `@panic` → `error.UnsupportedFuncrefMirror` | 可上游（通用） | 上游若修，删除 |
 | p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | `STACK_GUARD_HEADROOM` 全平台统一 1 MiB；两个后端对超出 headroom 的帧 decline（解释器接管） | **#495 仍 open** | 上游若采用别的修法（信号分类/逐页探测），按新形状重写 |
 | p4a | `feat(http): stream the response body from the live connection` | `handle` 只做 connect/send/head；body 由 guest 的 `read` 按需从活连接拉，固定 16 KiB transfer 缓冲，**去掉 8 MiB eager 上限**；transfer 单块堆分配（std 的指针自引用） | 上游 p2 http 尚缺 | 可上游化 |
+| p7 | `port: rebase onto upstream main (8 commits) and keep D-445 at the new choke point` | rebase 后上游新代码的 0.18 差异 4 处：① `errdefer \|err\|`（0.18 无捕获式）→ `run` 拆成包装 + `catch \|err\|`；② `@typeInfo(E).error_set` 非可选且不可迭代 → `error_names.?`；③④ `@typeInfo(P).pointer.alignment` → `pointer.attrs.@"align"`。另把 D-445 窄化搬到 `hostFnError`（上游新咽喉点），名单抽成 `Instance.isGuestFault` | 上游仍在 0.16 | 上游迁 0.18 后整条删除；分歧随上游 #535/PR #549 合并而消解 |
 | p6f | `feat(cli): say which import a component was refused for` | `zwasm run` 在 `UnsupportedWasiImport` 时追加诊断（接口#函数 + 代）；实测服务端面 `wasi:http/types#[method]incoming-request.consume` 被明确报出 | 通用改进 | 可上游化 |
 | p6e | `feat(http): transport failures carry their real error-code` | `handle` 的传输失败不再一律 `internal-error`：`errorCodeFor` 映射到规范错误码（connection-timeout / connection-refused / connection-terminated / destination-unavailable / DNS-error / TLS-protocol-error / TLS-certificate-error / HTTP-protocol-error，catch-all 仍 internal-error）；序号取 0.2.12 声明序。**遗留**：body 读失败仍以调用失败结束，未走 `stream-error::last-operation-failed`（需要 error 资源） | 上游 p2 http 尚缺 | 可上游化 |
 | p6d | `feat(http): would-block for non-blocking read, and an honest body pollable` | 非阻塞 `read` 在无数据时返回**空列表**（WASI would-block），`blocking-read` 仍等首字节；body 流的 pollable **真实就绪**（缓冲有字节 / socket 可读（零超时 poll）/ 传输已结束），新 `HTTP_P2_BODY_POLLABLE_RT` 携带 exchange 索引 | 上游 p2 http 尚缺 | 可上游化；「空列表指针须非空悬垂（对齐值 4）」是 canonical ABI 细节，值得上游注意 |
@@ -103,4 +105,6 @@ zig build && zig build test                                  # 见下
 
 - `test/component/invalid_pollable.{wat,wasm}` 是本 fork 新增的 fixture（合法组件 + `pollable.ready(999)`），上游没有。
 - 上游若改变 `mapDispatchErr` 的语义（例如新增 trap 种类），p3 需要按新形状重写，而不是简单保留。
-- 上游 HEAD 在本 fork 建立时只比基线多 1 个无关提交（`51634833f`），rebase 成本目前很低。
+- 上游 HEAD 在本 fork 建立时只比基线多 1 个无关提交（`51634833f`）；2026-10-17 复查时领先 8 个提交，已 rebase（零冲突）。
+- **上游仍在 Zig 0.16**（`b.standardOptimizeOption(.{})` 非可选、`std.builtin.OptimizeMode`），所以 p1/p2/p3b/p3c 的 0.18 移植**仍然必要**。
+- 上游 `f45dad90d`（#519）已在 marshal 边界把 host fn 的错误规范成 `HostTrap` —— 与 fork 的 p3 前半重叠；fork 把 D-445 归因搬到了这个新咽喉点（`Instance.isGuestFault`，`hostFnError` 与 `mapDispatchErr` 共用一份名单），并在上游那条 #519 测试里记录了**有意分歧**（期望 `Unreachable`）。上游 #535 / PR #549 正在走同一方向，合并后本分歧与窄化都可删。
