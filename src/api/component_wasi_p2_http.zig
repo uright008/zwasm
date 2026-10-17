@@ -22,6 +22,7 @@ const std = @import("std");
 
 const ctx_mod = @import("component_wasi_ctx.zig");
 const p3h = @import("component_wasi_p3_host.zig");
+const p2sock = @import("../wasi/p2_sockets.zig");
 const p3http = @import("../wasi/p3_http.zig");
 const resource_table = @import("../feature/component/resource_table.zig");
 const Host = @import("../wasi/host.zig").Host;
@@ -535,11 +536,16 @@ pub fn p2HttpIncomingBodyStream(caller: *Caller, self: u32, retptr: u32) WasiP2E
 /// `peekGreedy(1)` blocks until at least one byte or EOF — so both variants
 /// take the same host path, and the guest sees `stream-error::closed` at the
 /// end. Leftover bytes stay in the reader's transfer buffer for the next call.
-pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32) WasiP2Error!void {
+pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32, blocking: bool) WasiP2Error!void {
     const ex = try exchangeOf(ctx, rep);
     const want: usize = @intCast(@min(len, std.math.maxInt(u32)));
     const t = ex.transfer orelse return writeStreamClosed(mem, retptr);
     if (want == 0) return writeStreamClosed(mem, retptr);
+    // The non-blocking `read` may not wait: with nothing buffered anywhere and
+    // no readable socket it returns the EMPTY list, which is how WASI signals
+    // would-block. The guest waits on the stream's pollable (real readiness:
+    // buffered bytes, a readable socket, or EOF) and tries again.
+    if (!blocking and !bodyHasData(t)) return writeWouldBlock(mem, retptr);
     // Bound the actual HTTP/TLS read, including an incomplete chunk header or
     // TLS record. Socket readiness alone does not bound those parser reads.
     const deadline = effectiveDeadline(ex.between_bytes_ns, ctx.host.http_read_deadline_ns);
@@ -566,6 +572,38 @@ pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: 
 fn writeStreamClosed(mem: Memory, retptr: u32) WasiP2Error!void {
     try mem.write(retptr, @as(u8, 1)); // err
     try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed
+}
+
+
+/// True iff a body read would return bytes right now: something is buffered in
+/// the body reader or the connection reader, or the socket has data (or is at
+/// EOF, which a read reports as closed rather than blocking).
+fn bodyHasData(t: *Transfer) bool {
+    if (t.reader.bufferedLen() > 0) return true;
+    if (t.request.reader.in.bufferedLen() > 0) return true;
+    if (t.cancelled.isSet()) return true; // a read must surface the cancellation
+    const conn = t.request.connection orelse return true;
+    const handle = conn.stream_reader.stream.socket.handle;
+    return p2sock.pollOnce(handle, std.posix.POLL.IN) catch true;
+}
+
+/// Readiness of a body stream's pollable: bytes are available, the body has
+/// ended, or the transfer is gone (so the guest wakes up and reads the close).
+pub fn bodyPollableReady(ctx: *WasiP2Ctx, rep: u32) bool {
+    if (rep >= ctx.http_p2_exchanges.items.len) return true;
+    const ex = &ctx.http_p2_exchanges.items[rep];
+    const t = ex.transfer orelse return true;
+    return bodyHasData(t);
+}
+
+/// `result<list<u8>, stream-error>` with an empty list — the would-block shape.
+/// The pointer of an EMPTY list must be a non-null dangling value (the
+/// canonical ABI uses the element alignment, 4 here): Rust's generated code
+/// builds a `Vec` from it, and `Vec` rejects a null pointer even at length 0.
+fn writeWouldBlock(mem: Memory, retptr: u32) WasiP2Error!void {
+    try mem.write(retptr, @as(u8, 0)); // ok
+    try mem.write(retptr + 4, @as(u32, 4)); // list ptr: dangling, never dereferenced
+    try mem.write(retptr + 8, @as(u32, 0)); // list len 0
 }
 
 /// Drop-side cleanup for the exchange-backed handles. The body reader owns the

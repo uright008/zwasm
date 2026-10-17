@@ -332,6 +332,7 @@ pub const WasiP2Ctx = struct {
     pub const HTTP_P2_TRAILERS_RT: u32 = 25;
     pub const HTTP_P2_OUTGOING_BODY_RT: u32 = 26;
     pub const HTTP_P2_BODY_OUT_STREAM_RT: u32 = 27;
+    pub const HTTP_P2_BODY_POLLABLE_RT: u32 = 28;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.

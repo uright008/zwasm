@@ -2694,3 +2694,66 @@ test "wasi:http@0.2.x: a POST request body round-trips" {
     for (fails) |f| std.debug.print("[post-probe] {s}\n", .{f.string});
     try testing.expectEqual(@as(usize, 0), fails.len);
 }
+
+/// Sends the head at once but holds the body back for 300 ms, so the guest can
+/// observe would-block and pollable readiness.
+fn slowBodyServer(io: std.Io, server: *std.Io.net.Server) void {
+    var conn = server.accept(io) catch return;
+    defer conn.close(io);
+    var buf: [2048]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        var bufs = [_][]u8{buf[n..]};
+        const got = conn.read(io, &bufs) catch return;
+        if (got == 0) break;
+        n += got;
+        if (std.mem.find(u8, buf[0..n], "\r\n\r\n") != null) break;
+    }
+    var wbuf: [512]u8 = undefined;
+    var w = conn.writer(io, &wbuf);
+    w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n") catch return;
+    w.interface.flush() catch return;
+    io.sleep(.{ .nanoseconds = 300 * std.time.ns_per_ms }, .awake) catch return;
+    w.interface.writeAll("slow-body!") catch return;
+    w.interface.flush() catch return;
+}
+
+test "wasi:http@0.2.x: non-blocking read is would-block and the pollable is honest" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_fields_probe.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var server_fut = try io.concurrent(slowBodyServer, .{ io, &server });
+    defer _ = server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/slow", .{port});
+    defer testing.allocator.free(url);
+
+    var guest_err: std.ArrayList(u8) = .empty;
+    defer guest_err.deinit(testing.allocator);
+    host.stderr_buffer = &guest_err;
+    const out_val = opened.invokeTyped("snooze:http-probe/api@0.1.0#nonblocking-report", &.{.{ .string = url }}, testing.allocator) catch |e| {
+        std.debug.print("[guest stderr] {s}\n", .{guest_err.items});
+        return e;
+    };
+    const out = out_val.?;
+    defer out.deinit(testing.allocator);
+    const fails = out.list;
+    for (fails) |f| std.debug.print("[nonblocking-probe] {s}\n", .{f.string});
+    try testing.expectEqual(@as(usize, 0), fails.len);
+}
