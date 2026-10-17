@@ -93,6 +93,8 @@ pub const HttpP2Exchange = struct {
     /// `[method]future-incoming-response.get` hands the response out once; the
     /// outer `result` of the triple-nested return is `err` on later calls.
     retrieved: bool = false,
+    /// The guest's between-bytes timeout for lazy body reads (null = host cap).
+    between_bytes_ns: ?u64 = null,
 
     pub fn deinit(self: *HttpP2Exchange, alloc: std.mem.Allocator) void {
         if (self.transfer) |t| t.destroy(alloc);

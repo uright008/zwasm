@@ -2265,3 +2265,54 @@ test "wasi:http@0.2.x: the body streams — the guest reads before the server fi
 
     _ = try opened.invokeTyped("snooze:direct-http/api@0.1.0#close", &.{}, testing.allocator);
 }
+
+/// Accepts the request and then never answers: only a host-enforced deadline
+/// can end the call.
+fn silentHttpServer(io: std.Io, server: *std.Io.net.Server) void {
+    var conn = server.accept(io) catch return;
+    defer conn.close(io);
+    var buf: [2048]u8 = undefined;
+    var bufs = [_][]u8{&buf};
+    _ = conn.read(io, &bufs) catch return;
+    io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .awake) catch return;
+}
+
+test "wasi:http@0.2.x: a silent server cannot outwait the host deadline" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_p2_client.wasm", testing.allocator, .limited(1 << 22));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var server_fut = try io.concurrent(silentHttpServer, .{ io, &server });
+    defer server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    // The guest asks for one hour per timeout (deliberately). The host cap is
+    // what must end the call, so this test hangs for an hour if it does not.
+    host.http_head_deadline_ns = 300 * std.time.ns_per_ms;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/x", .{port});
+    defer testing.allocator.free(url);
+
+    const started = std.Io.Timestamp.now(io, .boot).toNanoseconds();
+    const res = (try opened.invokeTyped("snooze:direct-http/api@0.1.0#open", &.{.{ .string = url }}, testing.allocator)).?;
+    defer res.deinit(testing.allocator);
+    const elapsed_ms = @divTrunc(std.Io.Timestamp.now(io, .boot).toNanoseconds() - started, std.time.ns_per_ms);
+
+    // The guest maps the host's error-code to Err(String).
+    try testing.expect(res == .result and !res.result.is_ok);
+    try testing.expect(elapsed_ms < 2000);
+    try testing.expect(elapsed_ms >= 200); // it waited for the deadline, not failed early
+}

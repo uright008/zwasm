@@ -23,6 +23,7 @@ const std = @import("std");
 const ctx_mod = @import("component_wasi_ctx.zig");
 const p3http = @import("../wasi/p3_http.zig");
 const resource_table = @import("../feature/component/resource_table.zig");
+const builtin = @import("builtin");
 const Caller = @import("../zwasm/caller.zig").Caller;
 
 const Allocator = std.mem.Allocator;
@@ -49,8 +50,14 @@ fn exchangeOf(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*Exchange {
 /// case and keeps the 4-byte alignment.)
 fn writeInternalError(mem: Memory, retptr: u32) WasiP2Error!void {
     try mem.write(retptr, @as(u8, 1)); // err discriminant
-    try mem.write(retptr + 8, @as(u8, 37)); // internal-error
+    try mem.write(retptr + 8, @as(u8, 38)); // internal-error
     try mem.write(retptr + 16, @as(u8, 0)); // option<string> = none
+}
+
+/// Same shape, with a chosen `error-code` discriminant.
+fn writeErrorCode(mem: Memory, retptr: u32, code: u8) WasiP2Error!void {
+    try mem.write(retptr, @as(u8, 1)); // err discriminant
+    try mem.write(retptr + 8, code);
 }
 
 // ============================================================
@@ -208,14 +215,40 @@ pub fn p2HttpOutgoingHandlerHandle(caller: *Caller, request: u32, opt_disc: u32,
     ctx.http_p2_exchanges.append(ctx.alloc, .{}) catch return WasiP2Error.OutOfMemory;
     const ex = &ctx.http_p2_exchanges.items[idx];
     var status: u16 = 0;
-    ex.transfer = startTransfer(ctx, req, opts, &status) catch {
+    ex.transfer = startTransfer(ctx, req, opts, &status) catch |e| {
+        // A head that never arrives is the guest-visible `connection-timeout`
+        // (ordinal 8); everything else stays the internal-error catch-all.
+        if (e == error.ResponseTimeout) return writeErrorCode(mem, retptr, 8);
         return writeInternalError(mem, retptr);
     };
     ex.status = status;
+    ex.between_bytes_ns = opts.between_bytes_timeout_ns;
 
     const handle = ctx.resources.new(WasiP2Ctx.HTTP_P2_FUTURE_RT, idx) catch return WasiP2Error.OutOfMemory;
     try mem.write(retptr, @as(u8, 0)); // ok
     try mem.write(retptr + 8, handle); // error-code's option<u64> case aligns the payload to 8
+}
+
+/// Wait until `handle` is readable, or `timeout_ns` expires. Same readiness
+/// idiom as `p2_sockets.pollOnce`, with a deadline instead of a zero timeout.
+/// Windows uses the AFD path there; here it falls back to no deadline.
+fn waitReadable(handle: std.Io.net.Socket.Handle, timeout_ns: u64) WasiP2Error!bool {
+    if (builtin.os.tag == .windows) return true;
+    const ms: i32 = @intCast(@min(timeout_ns / std.time.ns_per_ms, @as(u64, std.math.maxInt(i32))));
+    var fds = [_]std.posix.pollfd{.{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 }};
+    const n = std.posix.poll(&fds, ms) catch return WasiP2Error.ReadFailed;
+    return n > 0 and (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0;
+}
+
+/// The socket behind a live transfer, for readiness waits.
+fn connectionHandle(t: *Transfer) ?std.Io.net.Socket.Handle {
+    const conn = t.request.connection orelse return null;
+    return conn.stream_reader.stream.socket.handle;
+}
+
+/// Guest value and host cap, whichever is smaller.
+fn effectiveDeadline(guest_ns: ?u64, host_ns: u64) u64 {
+    return @min(guest_ns orelse host_ns, host_ns);
 }
 
 /// A live exchange. `handle` leaves the connection open and the guest's
@@ -244,7 +277,6 @@ pub const Transfer = struct {
 
 /// Connect, send, read the response head. The body is left unread.
 fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpRequestOptions, status_out: *u16) !*Transfer {
-    _ = opts; // timeouts land with the deadline slice
     const io = ctx_mod.ctxIo(ctx) catch return error.NoHostIo;
     const alloc = ctx.alloc;
 
@@ -286,10 +318,23 @@ fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpReq
     errdefer t.client.deinit();
 
     const uri = try std.Uri.parse(url);
-    t.request = try t.client.request(method, uri, .{ .extra_headers = extra.items });
+    t.request = try t.client.request(method, uri, .{
+        .extra_headers = extra.items,
+        // `wasi:http` hands redirects to the guest; following them silently
+        // would hide the 3xx the guest asked to see.
+        .redirect_behavior = .unhandled,
+    });
     errdefer t.request.deinit();
     try t.request.sendBodiless();
 
+    // Bound the wait for the response head: the guest's connect timeout and the
+    // host cap, whichever is smaller. The connect inside `client.request` is
+    // owned by std and stays bounded by the OS; this covers "slow TLS, no
+    // headers" - the case a guest cannot outwait with a huge timeout.
+    if (connectionHandle(t)) |h| {
+        const deadline = effectiveDeadline(opts.connect_timeout_ns, ctx.host.http_head_deadline_ns);
+        if (!(try waitReadable(h, deadline))) return error.ResponseTimeout;
+    }
     t.response = try t.request.receiveHead(&t.head_buf);
     // Read the status BEFORE the body stream is initialized: `reader()`
     // invalidates the head's string pointers.
@@ -387,6 +432,17 @@ pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: 
     const t = ex.transfer orelse return writeStreamClosed(mem, retptr);
     if (want == 0) return writeStreamClosed(mem, retptr);
 
+    // Only poll when nothing is buffered anywhere in the chain: `receiveHead`
+    // (and any earlier read) may already have pulled body bytes off the socket
+    // - into the connection reader's buffer (`request.reader.in`) or into the
+    // body reader - and the raw fd would then look unreadable while the data
+    // sits in a buffer.
+    if (t.reader.bufferedLen() == 0 and t.request.reader.in.bufferedLen() == 0) {
+        if (connectionHandle(t)) |h| {
+            const deadline = effectiveDeadline(ex.between_bytes_ns, ctx.host.http_read_deadline_ns);
+            if (!(try waitReadable(h, deadline))) return WasiP2Error.ReadFailed;
+        }
+    }
     const chunk = t.reader.peekGreedy(1) catch |e| switch (e) {
         error.EndOfStream => {
             ex.deinit(ctx.alloc); // body finished: close the connection

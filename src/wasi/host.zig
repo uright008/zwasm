@@ -175,6 +175,13 @@ pub const Host = struct {
     /// syscalls return `Errno.nosys`.
     io: ?std.Io = null,
 
+    /// Host caps for `wasi:http@0.2.x` (snooze fork), in nanoseconds. The
+    /// guest's `request-options` may ask for anything; the effective deadline
+    /// is the smaller of the two, so a guest cannot outwait the host. The
+    /// daemon will feed these from the call's CallContext.
+    http_head_deadline_ns: u64 = 30 * std.time.ns_per_s,
+    http_read_deadline_ns: u64 = 30 * std.time.ns_per_s,
+
     /// Construct a Host with stdio fds 0 / 1 / 2 pre-populated.
     /// Callers grow `args` / `envs` / `preopens` via the
     /// respective setters before consuming the table.
