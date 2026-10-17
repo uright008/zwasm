@@ -2757,3 +2757,35 @@ test "wasi:http@0.2.x: non-blocking read is would-block and the pollable is hone
     for (fails) |f| std.debug.print("[nonblocking-probe] {s}\n", .{f.string});
     try testing.expectEqual(@as(usize, 0), fails.len);
 }
+
+test "wasi:http@0.2.x: a refused connection is reported as connection-refused" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_fields_probe.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    // Bind, take the port, then close: nothing listens there any more.
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    const port = server.socket.address.getPort();
+    server.deinit(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/nope", .{port});
+    defer testing.allocator.free(url);
+
+    const out = (try opened.invokeTyped("snooze:http-probe/api@0.1.0#refused-report", &.{.{ .string = url }}, testing.allocator)).?;
+    defer out.deinit(testing.allocator);
+    const fails = out.list;
+    for (fails) |f| std.debug.print("[refused-probe] {s}\n", .{f.string});
+    try testing.expectEqual(@as(usize, 0), fails.len);
+}

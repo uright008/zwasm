@@ -56,6 +56,24 @@ fn writeInternalError(mem: Memory, retptr: u32) WasiP2Error!void {
     try mem.write(retptr + 16, @as(u8, 0)); // option<string> = none
 }
 
+
+/// Map a transport failure to the `error-code` the WIT defines for it, so a
+/// guest can tell "the host refused the connection" from "the host is broken".
+/// Ordinals are the 0.2.12 declaration order (see `writeInternalError`).
+pub fn errorCodeFor(e: anyerror) u8 {
+    return switch (e) {
+        error.ResponseTimeout, error.ConnectionTimedOut, error.Timeout => 8, // connection-timeout
+        error.ConnectionRefused => 6, // connection-refused
+        error.ConnectionResetByPeer, error.BrokenPipe => 7, // connection-terminated
+        error.NetworkUnreachable, error.AddressNotAvailable => 3, // destination-unavailable
+        error.UnknownHostName, error.NameServerFailure, error.TemporaryNameServerFailure => 1, // DNS-error
+        error.TlsInitializationFailed, error.TlsAlert, error.TlsUnexpectedMessage => 12, // TLS-protocol-error
+        error.CertificateBundleLoadFailure => 13, // TLS-certificate-error
+        error.HttpHeadersInvalid, error.HttpHeaderContinuationsUnsupported, error.HttpTransferEncodingUnsupported, error.HttpConnectionHeaderUnsupported, error.HttpContentEncodingUnsupported => 35, // HTTP-protocol-error
+        else => 38, // internal-error (the catch-all the WIT provides)
+    };
+}
+
 /// Same shape, with a chosen `error-code` discriminant.
 fn writeErrorCode(mem: Memory, retptr: u32, code: u8) WasiP2Error!void {
     try mem.write(retptr, @as(u8, 1)); // err discriminant
@@ -230,10 +248,7 @@ pub fn p2HttpOutgoingHandlerHandle(caller: *Caller, request: u32, opt_disc: u32,
     var status: u16 = 0;
     var headers_rep: ?u32 = null;
     ex.transfer = startTransfer(ctx, req, opts, &status, &headers_rep) catch |e| {
-        // A head that never arrives is the guest-visible `connection-timeout`
-        // (ordinal 8); everything else stays the internal-error catch-all.
-        if (e == error.ResponseTimeout) return writeErrorCode(mem, retptr, 8);
-        return writeInternalError(mem, retptr);
+        return writeErrorCode(mem, retptr, errorCodeFor(e));
     };
     ex.status = status;
     ex.headers_rep = headers_rep;
