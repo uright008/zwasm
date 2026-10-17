@@ -21,10 +21,19 @@
 | p3e | `safety: two reachable aborts become typed errors` | `invokeFlat` 的 arity assert → `error.ArgArityMismatch`；`Table.set` 的 JIT funcref `@panic` → `error.UnsupportedFuncrefMirror` | 可上游（通用） | 上游若修，删除 |
 | p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | `STACK_GUARD_HEADROOM` 全平台统一 1 MiB；两个后端对超出 headroom 的帧 decline（解释器接管） | **#495 仍 open** | 上游若采用别的修法（信号分类/逐页探测），按新形状重写 |
 | p4a | `feat(http): stream the response body from the live connection` | `handle` 只做 connect/send/head；body 由 guest 的 `read` 按需从活连接拉，固定 16 KiB transfer 缓冲，**去掉 8 MiB eager 上限**；transfer 单块堆分配（std 的指针自引用） | 上游 p2 http 尚缺 | 可上游化 |
+| p6a | `feat(http): the 0.2 spellings of fields, request-options and outgoing-request` | 0.2 与 0.3 命名差异补齐：`fields` 全量（from-list/get/has/set/delete/append/entries/clone）、`request-options` 三个 getter（0.3 叫 `get-*`）、`outgoing-request` 的 method/set-method/scheme/authority/path-with-query/headers（0.3 改名 `request`）；`headers()` 返回**不可变快照**（set/append/delete → `header-error.immutable`）；未分类 import 现在带诊断（报出 iface#func） | 上游 p2 http 尚缺 | 可上游化 |
 | p5a | `feat(host): an embedder seam for component imports, with admission` | `Host.host_imports` 注册自定义接口（`snooze:host/*`，原始签名 + `RawHostFn`，data 经 `caller.host_data`）；未注册且非 WASI 行 → 链接期拒绝（默认拒绝）；`Host.admission_fn` 对**每个** import 生效，返回 false → `ImportDenied`（能力目录唯一真源，WASI helper 不再隐式授权） | 上游无此概念（其 host 注入靠 Rust 侧） | 通用能力，可上游化；snooze 专属语义留在 fork |
 | p4c | `feat(http): host-side cancellation, and a per-thread interp stack limit` | 活 transfer 通过 Host 上的原子钩子发布，`Host.cancelHttp()` 可跨线程 shutdown socket，让阻塞的 body 读立刻返回；被取消的传输标记为失败而不是「正常 EOF」；背压在流式模型下天然成立 | 上游 p2 http 尚缺 | 可上游化（含 `native_stack_limit` threadlocal 修复：跨线程调用 guest 曾立即 `CallStackExhausted`） |
 | p4b | `feat(http): host-enforced deadlines for the response head and body reads` | 生效 `request-options` 超时：有效期限 = min(guest, 宿主上限)；宿主上限在 `Host`（`http_head_deadline_ns`/`http_read_deadline_ns`，默认 30s）；头超时映射为 `connection-timeout`；重定向改为不自动跟随 | 同上 | 可上游化 |
 | p4 | `feat(http): wasi:http@0.2.x client support — a real p2 guest does a GET` | 新增 `component_wasi_p2_http.zig`：`wasi:http/types` 的 fields/outgoing-request/request-options/incoming-response/incoming-body/future-incoming-response + `outgoing-handler.handle`；`adapter.Entry.op_p2` 支持同名函数按代选 op；body 走新的 input-stream backing | 上游 p2 http 尚缺（其实现是 p3 优先） | 可上游化（通用能力）；若上游实现 p2 http，删除本条 |
+
+## 2026-10-17 review 修复
+
+- `Transfer` 使用完整结构体初始化，确保取消状态不依赖分配器返回的内存内容。
+- 取消目标的注册、回调和移除共用 `Host.http_cancel_mutex`；销毁先移除目标，等待已进入的取消回调结束。回调只设置 `Io.Event`，不跨线程读取或关闭正在初始化的连接。
+- HTTP 使用 `std.Io.Select` 将完整网络操作与绝对期限、宿主取消信号竞争；返回前取消并等待所有任务结束。头期限覆盖 DNS、连接、TLS、发送和完整响应头，取宿主上限与 guest connect/first-byte timeout 的最小值；body 读取也覆盖不完整 chunk/TLS 帧。需要支持 `concurrent` 和取消的 `std.Io` 后端（本机验证为 `Io.Threaded`）。
+- 新增 7 项回归：脏内存初始化、取消与移除交错、部分响应头超时、guest first-byte timeout、部分 chunk 头超时、TLS 握手超时、部分响应头期间取消。
+- 本机验证：`zig build` 通过；`zig build test` 通过，本次执行 3283 passed / 12 skipped / 0 failed，其余测试目标使用成功缓存。
 
 ## 尚未实施（后续批次）
 
@@ -67,7 +76,8 @@ zig build && zig build test                                  # 见下
 - 顺带修掉一个真 bug：解释器 `native_stack_limit` 缓存在 Runtime 上（应随线程），跨线程驱动同一 guest 调用会立即 `CallStackExhausted`；已改为 threadlocal。
 - **宿主 seam**：`test/component/host_import_probe.{wat,wasm}` 导入 `snooze:host/probe#answer`：(1) 未注册 → `UnsupportedWasiImport`；(2) 注册 → guest 拿到宿主返回的 4242；(3) 注册但准入拒绝 → `ImportDenied`。
 - **卸载屏障**：guest 调用阻塞在 body 读时，`beginClose()` → 新调用 `InstanceClosing`；`cancelHttp()` 解除阻塞；`drain()` 返回 true 且 `inFlight()==0`；此后才销毁组件，取消目标已清空。
-- 核心套件 **3274 passed / 12 skipped / 0 failed**。
+- **0.2 面补齐**：`test/component/http_fields_probe.wasm`（Rust wasip2 1.0.4 guest）自跑约 25 项检查（含无效 header 名、不可变视图两条错误路径），返回失败清单；实测为空。
+- 核心套件 **3282 passed / 12 skipped / 0 failed**。
 - 注：定义表（`host_imports`）已可注入；`Linker` 对象本身仍由内部创建——注册表已覆盖「自定义 import + 默认拒绝」的需求，暂不需要暴露 Linker 对象。
 
 回归基线（本机）：
