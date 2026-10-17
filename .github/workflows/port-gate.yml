@@ -1,0 +1,89 @@
+# The fork's gate for the Zig 0.18-dev port branch (see PATCHES.md).
+#
+# Upstream's ci.yml pins Zig 0.16 and only runs on pushes to `main` and on pull
+# requests, so it never covers this branch — without this workflow the port has
+# no automated check at all and every gate is a hand-run on one machine.
+#
+# It pins the exact toolchain the port was developed against (a dev build, so the
+# version is part of the pin) and wasm-tools, which the spectest WAT->wasm step
+# and the spec runners need.
+
+name: port gate
+
+on:
+  push:
+    branches: [zig-0.18-port]
+  pull_request:
+    branches: [zig-0.18-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per ref; a newer push cancels an older run.
+  group: port-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Zig dev builds are pruned from ziglang.org within weeks, so a hard-coded
+      # dev URL rots. Empty = resolve the current master version at run time;
+      # set it to pin (e.g. "0.18.0-dev.253+16d31ceed") when the gate must be
+      # reproducible across days.
+      ZIG_VERSION: ""
+      WASM_TOOLS_VERSION: 1.262.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig (0.18-dev)
+        run: |
+          set -euo pipefail
+          if [ -z "${ZIG_VERSION}" ]; then
+            ZIG_VERSION="$(curl -fsSL https://ziglang.org/download/index.json \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["master"]["version"])')"
+          fi
+          echo "installing zig ${ZIG_VERSION}"
+          curl -fsSL "https://ziglang.org/builds/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Install wasm-tools ${{ env.WASM_TOOLS_VERSION }}
+        run: |
+          set -euo pipefail
+          dir="wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux"
+          curl -fsSL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/${dir}.tar.gz" -o /tmp/wt.tar.gz
+          tar -xzf /tmp/wt.tar.gz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "/tmp/${dir}/wasm-tools" "$HOME/.local/bin/wasm-tools"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          zig version
+          wasm-tools --version
+
+      - name: Build
+        run: zig build --summary all
+
+      # The unit suite includes the wasi:http@0.2.x end-to-end tests (a real
+      # wasip2 guest against loopback servers), the host-import seam, and the
+      # unload barrier, so a regression there fails here.
+      - name: Unit suite
+        run: zig build test --summary all
+
+      - name: Core spec corpora
+        run: zig build test-spec-assert test-spec-wasm-2.0-assert test-spec-threads-assert test-edge-cases --summary all
+
+      - name: Component Model spec corpus
+        run: zig build test-component-spec --summary all
+
+      # Interp lane only: the JIT lane carries 8 known try_table directives
+      # (upstream #378, enumerated in its known list) and is run by upstream's
+      # own gate on main.
+      - name: Wasm 3.0 spec corpus (interp lane)
+        run: zig build test-spec-wasm-3.0-assert --summary all
