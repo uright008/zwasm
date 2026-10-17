@@ -21,6 +21,7 @@
 | p3e | `safety: two reachable aborts become typed errors` | `invokeFlat` 的 arity assert → `error.ArgArityMismatch`；`Table.set` 的 JIT funcref `@panic` → `error.UnsupportedFuncrefMirror` | 可上游（通用） | 上游若修，删除 |
 | p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | `STACK_GUARD_HEADROOM` 全平台统一 1 MiB；两个后端对超出 headroom 的帧 decline（解释器接管） | **#495 仍 open** | 上游若采用别的修法（信号分类/逐页探测），按新形状重写 |
 | p4a | `feat(http): stream the response body from the live connection` | `handle` 只做 connect/send/head；body 由 guest 的 `read` 按需从活连接拉，固定 16 KiB transfer 缓冲，**去掉 8 MiB eager 上限**；transfer 单块堆分配（std 的指针自引用） | 上游 p2 http 尚缺 | 可上游化 |
+| p4c | `feat(http): host-side cancellation, and a per-thread interp stack limit` | 活 transfer 通过 Host 上的原子钩子发布，`Host.cancelHttp()` 可跨线程 shutdown socket，让阻塞的 body 读立刻返回；被取消的传输标记为失败而不是「正常 EOF」；背压在流式模型下天然成立 | 上游 p2 http 尚缺 | 可上游化（含 `native_stack_limit` threadlocal 修复：跨线程调用 guest 曾立即 `CallStackExhausted`） |
 | p4b | `feat(http): host-enforced deadlines for the response head and body reads` | 生效 `request-options` 超时：有效期限 = min(guest, 宿主上限)；宿主上限在 `Host`（`http_head_deadline_ns`/`http_read_deadline_ns`，默认 30s）；头超时映射为 `connection-timeout`；重定向改为不自动跟随 | 同上 | 可上游化 |
 | p4 | `feat(http): wasi:http@0.2.x client support — a real p2 guest does a GET` | 新增 `component_wasi_p2_http.zig`：`wasi:http/types` 的 fields/outgoing-request/request-options/incoming-response/incoming-body/future-incoming-response + `outgoing-handler.handle`；`adapter.Entry.op_p2` 支持同名函数按代选 op；body 走新的 input-stream backing | 上游 p2 http 尚缺（其实现是 p3 优先） | 可上游化（通用能力）；若上游实现 p2 http，删除本条 |
 
@@ -60,7 +61,9 @@ zig build && zig build test                                  # 见下
 - **p2 HTTP 端到端**：真实 Rust wasip2 1.0.4 + wasi:http 0.2.12 guest（`test/component/http_p2_client.wasm`）对回环服务器 GET：`open` → 200，`read` → `hello-http`，`close` 正常。
 - **真流式**：服务器发一半、等 300 ms 再发另一半；guest 在第二块尚未发出时就读到第一块（1 ms），证明宿主不再整体缓冲。
 - **宿主期限**：服务器静默不答、guest 要 1 小时超时、宿主上限 300 ms → 调用在期限内失败（`connection-timeout`）。
-- 核心套件 **3271 passed / 12 skipped / 0 failed**。
+- **可取消**：服务器只发 head 不发 body，guest 的 `read` 阻塞；主线程 `host.cancelHttp()` 让它在毫秒级返回并把调用判为失败（宿主 30s 期限未参与）。
+- 顺带修掉一个真 bug：解释器 `native_stack_limit` 缓存在 Runtime 上（应随线程），跨线程驱动同一 guest 调用会立即 `CallStackExhausted`；已改为 threadlocal。
+- 核心套件 **3272 passed / 12 skipped / 0 failed**。
 
 回归基线（本机）：
 
