@@ -96,7 +96,27 @@ noinline fn runFrame(
 /// (empty sig + empty locals) is pushed for the duration. This
 /// keeps small handler tests green without forcing every test to
 /// stage a full frame.
+/// Trampoline dispatch loop. The body lives in `runBody` so that a failing call
+/// can record its frame in the trap trace with the error in hand: Zig 0.18 has
+/// no capturing `errdefer`, and the frame must be recorded while the call still
+/// owns it. `record` copies scalars only, so running after the body's own
+/// defers is safe.
 pub fn run(
+    rt: *Runtime,
+    table: *const DispatchTable,
+    initial_instrs: []const ZirInstr,
+) anyerror!void {
+    const entry_depth = rt.frame_len;
+    return runBody(rt, table, initial_instrs) catch |err| {
+        // ADR-0232 D2: the frame this call owns joins the trap trace as an
+        // error leaves. An exception may yet be caught, so it records nothing.
+        if (err != error.UncaughtException and entry_depth > 0 and rt.frame_len == entry_depth)
+            trap_trace.record(rt.currentFrame());
+        return err;
+    };
+}
+
+fn runBody(
     rt: *Runtime,
     table: *const DispatchTable,
     initial_instrs: []const ZirInstr,
@@ -105,7 +125,6 @@ pub fn run(
     rt.table = table;
     defer rt.table = saved_table;
 
-    const entry_depth = rt.frame_len;
     const ephemeral = rt.frame_len == 0;
     if (ephemeral) {
         const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
@@ -130,14 +149,6 @@ pub fn run(
     // the caller's own defer-free retains ownership.
     var prev_trampoline_locals: ?[]runtime.Value = null;
     defer if (prev_trampoline_locals) |l| rt.alloc.free(l);
-
-    // ADR-0232 D2: the frame this call owns joins the trap trace as an error
-    // leaves. Declared after the defer above so it runs first, while a tail
-    // callee's locals are still allocated. At another depth the frame is not
-    // this call's (one `run` pushed for itself, or a tail switch that failed
-    // after popping). An exception may yet be caught, so it records nothing.
-    errdefer |err| if (err != error.UncaughtException and entry_depth > 0 and rt.frame_len == entry_depth)
-        trap_trace.record(rt.currentFrame());
 
     var instrs = initial_instrs;
     while (true) {
@@ -227,7 +238,7 @@ fn buildSmokeTable() DispatchTable {
 }
 
 test "runFrame stays 64-byte aligned (#541)" {
-    try testing.expectEqual(@as(?usize, 64), @typeInfo(@TypeOf(&runFrame)).pointer.alignment);
+    try testing.expectEqual(@as(?usize, 64), @typeInfo(@TypeOf(&runFrame)).pointer.attrs.@"align");
 }
 
 test "step: unbound op slot returns Trap.Unreachable" {

@@ -664,6 +664,30 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
 /// only in a test that reaches it (#490: a thunk's second spelling of ProcExit).
 /// An embedder's host fn cannot reach the `else`: `host_func_marshal.hostFnError`
 /// narrows its error at the thunk.
+/// D-445: is this error a GUEST fault (bad handle, bad (ptr,len), illegal
+/// drop/cancel sequencing)? The canonical guest trap for those is
+/// `error.Unreachable`, and the check is shared so the list has one home: the
+/// sync trampolines reach `mapDispatchErr`, while host-fn errors are normalized
+/// earlier by the marshal layer's `hostFnError`. Table exhaustion counts as a
+/// guest fault (a guest can leak handles), which is why TableFull is in the
+/// list.
+pub fn isGuestFault(err: anyerror) bool {
+    return switch (err) {
+        error.InvalidHandle,
+        error.TypeMismatch,
+        error.HandleStillBorrowed,
+        error.TableFull,
+        error.CopyInProgress,
+        error.NotCopying,
+        error.InvalidCallbackCode,
+        error.FutureDropBeforeWrite,
+        error.CopyNotIdle,
+        error.OutOfBounds,
+        => true,
+        else => false,
+    };
+}
+
 fn mapDispatchErr(err: anyerror) Instance.InvokeError {
     return switch (err) {
         error.Unreachable => error.Unreachable,
@@ -694,28 +718,13 @@ fn mapDispatchErr(err: anyerror) Instance.InvokeError {
         error.ProcExit => error.ProcExit,
         // D-445: a guest that supplies a bad handle, a bad (ptr,len) or illegal
         // drop/cancel sequencing is at fault, and the canonical guest trap is
-        // `error.Unreachable`. `mapAsyncFault` already narrows these for the
-        // async-builtin path; the sync trampolines reach this function instead,
-        // so the same names are narrowed here — one chokepoint rather than 59
-        // call sites. Table exhaustion counts as a guest fault (a guest can leak
-        // handles), which is why TableFull is in the list.
-        error.InvalidHandle,
-        error.TypeMismatch,
-        error.HandleStillBorrowed,
-        error.TableFull,
-        error.CopyInProgress,
-        error.NotCopying,
-        error.InvalidCallbackCode,
-        error.FutureDropBeforeWrite,
-        error.CopyNotIdle,
-        error.OutOfBounds,
-        => error.Unreachable,
-        // Anything else is not a guest fault we know how to attribute. It must
-        // still become a trap rather than killing the process — an embedder
-        // running untrusted plugins cannot have guest input abort the host —
-        // and trap_surface.zig maps HostTrap to a binding error, so real host
-        // bugs stay diagnosable instead of silent.
-        else => return error.HostTrap,
+        // `error.Unreachable` (see `isGuestFault`, shared with the host-fn
+        // marshal layer). Anything else is not a guest fault we know how to
+        // attribute. It must still become a trap rather than killing the process
+        // — an embedder running untrusted plugins cannot have guest input abort
+        // the host — and trap_surface.zig maps HostTrap to a binding error, so
+        // real host bugs stay diagnosable instead of silent.
+        else => if (isGuestFault(err)) error.Unreachable else return error.HostTrap,
     };
 }
 

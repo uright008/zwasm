@@ -2028,7 +2028,7 @@ pub fn dispatchTable() *const dispatch_table_mod.DispatchTable {
 }
 
 test "g_dispatch_table_storage stays page-aligned (#541)" {
-    try testing.expectEqual(@as(?usize, 4096), @typeInfo(@TypeOf(&g_dispatch_table_storage)).pointer.alignment);
+    try testing.expectEqual(@as(?usize, 4096), @typeInfo(@TypeOf(&g_dispatch_table_storage)).pointer.attrs.@"align");
 }
 
 /// `zwasm_instance_get_func` — project-extension helper that
