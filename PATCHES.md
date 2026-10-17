@@ -31,6 +31,7 @@
 | 批次 | 内容 | 依赖 |
 | --- | --- | --- |
 | p4 | 宿主 seam：可注入的 linker/host 定义表、`snooze:host/*` 注册、准入期默认拒绝 | [zwasm-fork-plan.md](zwasm-fork-plan.md) §3/§4 |
+| p5b-done | `feat(host): the unload barrier - admission, cancel, drain` | `Host.enterCall/leaveCall` 计数在途调用（typed invoke 与 `wasi:cli/run` 都过闸门）；`beginClose()` 关准入（新调用 → `InstanceClosing`）；`drain(io, timeout)` 等到归零才返回；`cancelHttp()` 是解除宿主 IO 阻塞的前提 | 上游无此概念 | snooze 专属编排留在 fork；闸门本身通用 |
 | p5b | drain / 卸载屏障：`BuiltComponent` 的在途调用计数 + `drain()`、`WasiP2Ctx` 在途表清理、p3 栈上 `TaskTable` 提升 | 同上 |
 | p6 | 标准 p2 HTTP（`wasi:http/types` + `outgoing-handler`）、流式/背压、取消 | [zwasm-fork-feasibility.md](zwasm-fork-feasibility.md) §4 |
 | p7 | snooze 专属语义（能力目录、改权=停旧→drain→重建）——**不进上游** | 同上 |
@@ -65,7 +66,8 @@ zig build && zig build test                                  # 见下
 - **可取消**：服务器只发 head 不发 body，guest 的 `read` 阻塞；主线程 `host.cancelHttp()` 让它在毫秒级返回并把调用判为失败（宿主 30s 期限未参与）。
 - 顺带修掉一个真 bug：解释器 `native_stack_limit` 缓存在 Runtime 上（应随线程），跨线程驱动同一 guest 调用会立即 `CallStackExhausted`；已改为 threadlocal。
 - **宿主 seam**：`test/component/host_import_probe.{wat,wasm}` 导入 `snooze:host/probe#answer`：(1) 未注册 → `UnsupportedWasiImport`；(2) 注册 → guest 拿到宿主返回的 4242；(3) 注册但准入拒绝 → `ImportDenied`。
-- 核心套件 **3273 passed / 12 skipped / 0 failed**。
+- **卸载屏障**：guest 调用阻塞在 body 读时，`beginClose()` → 新调用 `InstanceClosing`；`cancelHttp()` 解除阻塞；`drain()` 返回 true 且 `inFlight()==0`；此后才销毁组件，取消目标已清空。
+- 核心套件 **3274 passed / 12 skipped / 0 failed**。
 - 注：定义表（`host_imports`）已可注入；`Linker` 对象本身仍由内部创建——注册表已覆盖「自定义 import + 默认拒绝」的需求，暂不需要暴露 Linker 对象。
 
 回归基线（本机）：
