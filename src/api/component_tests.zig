@@ -2316,3 +2316,109 @@ test "wasi:http@0.2.x: a silent server cannot outwait the host deadline" {
     try testing.expect(elapsed_ms < 2000);
     try testing.expect(elapsed_ms >= 200); // it waited for the deadline, not failed early
 }
+
+/// Sends the response head and then never the body: a body read blocks until
+/// something cancels it.
+fn stalledBodyServer(io: std.Io, server: *std.Io.net.Server) void {
+    var conn = server.accept(io) catch return;
+    defer conn.close(io);
+    var buf: [2048]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        var bufs = [_][]u8{buf[n..]};
+        const got = conn.read(io, &bufs) catch return;
+        if (got == 0) break;
+        n += got;
+        if (std.mem.find(u8, buf[0..n], "\r\n\r\n") != null) break;
+    }
+    var wbuf: [512]u8 = undefined;
+    var w = conn.writer(io, &wbuf);
+    w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n") catch return;
+    w.interface.flush() catch return;
+    io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .awake) catch return;
+}
+
+const ReadOutcome = struct {
+    /// Set once `open` returned 200, so the test knows the read is next.
+    opened_ok: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    finished: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    trapped: bool = false,
+};
+
+/// Runs the WHOLE guest interaction on one thread: the interpreter's native
+/// stack limit is per-thread, so mixing threads across a single guest call is
+/// not a supported pattern (the runtime caches per thread now, but the store
+/// still belongs to one thread).
+fn openThenReadInBackground(opened: *component.Opened, url: []const u8, out: *ReadOutcome) void {
+    const st = opened.invokeTyped("snooze:direct-http/api@0.1.0#open", &.{.{ .string = url }}, std.testing.allocator) catch {
+        out.finished.store(true, .release);
+        return;
+    };
+    const ok = st != null and st.? == .result and st.?.result.is_ok;
+    if (st) |v| v.deinit(std.testing.allocator);
+    out.opened_ok.store(ok, .release);
+    if (!ok) {
+        out.finished.store(true, .release);
+        return;
+    }
+    const v = opened.invokeTyped("snooze:direct-http/api@0.1.0#read", &.{.{ .u64 = 64 }}, std.testing.allocator) catch {
+        out.trapped = true;
+        out.finished.store(true, .release);
+        return;
+    };
+    if (v) |val| val.deinit(std.testing.allocator);
+    out.finished.store(true, .release);
+}
+
+test "wasi:http@0.2.x: a host-side cancel unblocks a stalled body read" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_p2_client.wasm", testing.allocator, .limited(1 << 22));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var server_fut = try io.concurrent(stalledBodyServer, .{ io, &server });
+    defer _ = server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    // The host read deadline stays at its 30 s default: the cancel must be what
+    // ends the read, not the deadline.
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/x", .{port});
+    defer testing.allocator.free(url);
+
+    // The whole guest interaction runs on a real thread with a large stack (the
+    // interpreter recurses per wasm call); the main thread only cancels.
+    var outcome: ReadOutcome = .{};
+    var reader_thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, openThenReadInBackground, .{ &opened, url, &outcome });
+
+    // Wait for `open` (200), then let the read block in the kernel waiting for
+    // a body that never comes.
+    var waited_ms: usize = 0;
+    while (!outcome.opened_ok.load(.acquire) and waited_ms < 2000) : (waited_ms += 10) {
+        io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+    }
+    try testing.expect(outcome.opened_ok.load(.acquire));
+    io.sleep(.{ .nanoseconds = 150 * std.time.ns_per_ms }, .awake) catch {};
+    try testing.expect(!outcome.finished.load(.acquire)); // still blocked
+
+    const cancel_at = std.Io.Timestamp.now(io, .boot).toNanoseconds();
+    host.cancelHttp();
+    reader_thread.join();
+    const elapsed_ms = @divTrunc(std.Io.Timestamp.now(io, .boot).toNanoseconds() - cancel_at, std.time.ns_per_ms);
+
+    try testing.expect(outcome.finished.load(.acquire));
+    try testing.expect(outcome.trapped); // the guest sees the read fail
+    try testing.expect(elapsed_ms < 2000); // unblocked by the cancel, not the deadline
+}

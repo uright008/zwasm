@@ -182,6 +182,23 @@ pub const Host = struct {
     http_head_deadline_ns: u64 = 30 * std.time.ns_per_s,
     http_read_deadline_ns: u64 = 30 * std.time.ns_per_s,
 
+    /// Cancellation hook for the in-flight `wasi:http@0.2.x` transfer. The http
+    /// layer installs the function and the target while a transfer is live and
+    /// clears the target when it ends; a host-side canceller (generation
+    /// retirement, shutdown) calls `cancelHttp` from another thread, which
+    /// shuts the socket down so a blocked body read returns instead of waiting
+    /// for its deadline. Atomic because the two sides are different threads.
+    http_cancel_fn: ?*const fn (*anyopaque) void = null,
+    http_cancel_target: std.atomic.Value(?*anyopaque) = std.atomic.Value(?*anyopaque).init(null),
+
+    /// Cancel the live p2 http transfer, if any. Safe to call from any thread;
+    /// a no-op when nothing is in flight.
+    pub fn cancelHttp(self: *Host) void {
+        const f = self.http_cancel_fn orelse return;
+        const target = self.http_cancel_target.load(.acquire) orelse return;
+        f(target);
+    }
+
     /// Construct a Host with stdio fds 0 / 1 / 2 pre-populated.
     /// Callers grow `args` / `envs` / `preopens` via the
     /// respective setters before consuming the table.

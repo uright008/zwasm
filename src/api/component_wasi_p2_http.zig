@@ -223,6 +223,7 @@ pub fn p2HttpOutgoingHandlerHandle(caller: *Caller, request: u32, opt_disc: u32,
     };
     ex.status = status;
     ex.between_bytes_ns = opts.between_bytes_timeout_ns;
+    registerCancel(ctx, ex.transfer.?);
 
     const handle = ctx.resources.new(WasiP2Ctx.HTTP_P2_FUTURE_RT, idx) catch return WasiP2Error.OutOfMemory;
     try mem.write(retptr, @as(u8, 0)); // ok
@@ -246,6 +247,26 @@ fn connectionHandle(t: *Transfer) ?std.Io.net.Socket.Handle {
     return conn.stream_reader.stream.socket.handle;
 }
 
+/// Trampoline for `Host.http_cancel_fn` (it takes `*anyopaque`).
+fn cancelTransfer(target: *anyopaque) void {
+    const t: *Transfer = @ptrCast(@alignCast(target));
+    t.cancel();
+}
+
+/// Publish the live transfer for host-side cancellation.
+fn registerCancel(ctx: *WasiP2Ctx, t: *Transfer) void {
+    ctx.host.http_cancel_fn = cancelTransfer;
+    ctx.host.http_cancel_target.store(t, .release);
+}
+
+/// Drop the transfer (and its connection) and clear the cancel target.
+fn destroyExchange(ctx: *WasiP2Ctx, ex: *Exchange) void {
+    if (ex.transfer) |t| {
+        _ = ctx.host.http_cancel_target.cmpxchgStrong(t, null, .release, .acquire);
+    }
+    ex.deinit(ctx.alloc);
+}
+
 /// Guest value and host cap, whichever is smaller.
 fn effectiveDeadline(guest_ns: ?u64, host_ns: u64) u64 {
     return @min(guest_ns orelse host_ns, host_ns);
@@ -266,12 +287,24 @@ pub const Transfer = struct {
     reader: *std.Io.Reader,
     head_buf: [8192]u8 = undefined,
     transfer_buf: [16 * 1024]u8 = undefined,
+    /// Set by `cancel` before the socket is shut down, so a read that the
+    /// cancel unblocks fails the call instead of looking like a normal EOF.
+    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn destroy(self: *Transfer, alloc: Allocator) void {
         // LIFO of the eager path: request (closes the connection) then client.
         self.request.deinit();
         self.client.deinit();
         alloc.destroy(self);
+    }
+
+    /// Cancel from another thread: shut the socket down so a body read blocked
+    /// in the kernel returns. Idempotent; the transfer itself is still owned by
+    /// the guest-facing handles and is freed by `destroyExchange`.
+    pub fn cancel(self: *Transfer) void {
+        self.cancelled.store(true, .release);
+        const conn = self.request.connection orelse return;
+        conn.stream_reader.stream.shutdown(self.client.io, .both) catch {};
     }
 };
 
@@ -431,6 +464,8 @@ pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: 
     const want: usize = @intCast(@min(len, std.math.maxInt(u32)));
     const t = ex.transfer orelse return writeStreamClosed(mem, retptr);
     if (want == 0) return writeStreamClosed(mem, retptr);
+    // A cancelled transfer must not read as a clean end of body.
+    if (t.cancelled.load(.acquire)) return WasiP2Error.ReadFailed;
 
     // Only poll when nothing is buffered anywhere in the chain: `receiveHead`
     // (and any earlier read) may already have pulled body bytes off the socket
@@ -445,11 +480,15 @@ pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: 
     }
     const chunk = t.reader.peekGreedy(1) catch |e| switch (e) {
         error.EndOfStream => {
-            ex.deinit(ctx.alloc); // body finished: close the connection
+            // A shutdown from `cancel` also surfaces as EOF: report the
+            // cancellation as a failed call, not as a clean end of body.
+            if (t.cancelled.load(.acquire)) return WasiP2Error.ReadFailed;
+            destroyExchange(ctx, ex); // body finished: close the connection
             return writeStreamClosed(mem, retptr);
         },
         else => return WasiP2Error.ReadFailed,
     };
+    if (t.cancelled.load(.acquire)) return WasiP2Error.ReadFailed; // raced with cancel
     const n = @min(want, chunk.len);
     const ptr = try ctx.reallocGuest(@intCast(n), 1);
     @memcpy(mem.sliceAt(ptr, @intCast(n)) catch return WasiP2Error.OutOfBounds, chunk[0..n]);
@@ -469,6 +508,6 @@ fn writeStreamClosed(mem: Memory, retptr: u32) WasiP2Error!void {
 pub fn dropExchangeHandle(ctx: *WasiP2Ctx, rt: u32, rep: u32) void {
     if (rep >= ctx.http_p2_exchanges.items.len) return;
     if (rt == WasiP2Ctx.HTTP_P2_BODY_STREAM_RT) {
-        ctx.http_p2_exchanges.items[rep].deinit(ctx.alloc);
+        destroyExchange(ctx, &ctx.http_p2_exchanges.items[rep]);
     }
 }

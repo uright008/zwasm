@@ -137,6 +137,10 @@ pub fn slotCountForValType(v: zir.ValType) u32 {
 
 /// Per-instance interpreter state. Owns linear memory + globals
 /// (heap-backed); operand and frame stacks are inline.
+/// Per-thread cache of the interpreter's native stack limit (see
+/// `Runtime.checkNativeStackLimit`).
+threadlocal var interp_stack_limit: ?usize = null;
+
 pub const Runtime = struct {
     /// Allocator that backs every runtime-owned slice (memory,
     /// globals, tables.refs, elems, func_entities, dropped flags).
@@ -615,9 +619,15 @@ pub const Runtime = struct {
     /// lazily once on the running thread; a `0` (unsupported-platform)
     /// limit disables the check, leaving `frame_buf[256]` as the guard.
     pub fn checkNativeStackLimit(self: *Runtime, sp: usize) Trap!void {
-        const limit = self.native_stack_limit orelse blk: {
+        // The limit depends on the RUNNING THREAD's stack, so the lazy cache is
+        // threadlocal: caching it on the Runtime made a guest call that moved to
+        // another thread compare its frames against the first thread's stack
+        // bounds and trap CallStackExhausted immediately (found while testing
+        // host-side cancellation, which drives a call from a second thread).
+        // The Runtime field stays as an explicit override for tests.
+        const limit = self.native_stack_limit orelse interp_stack_limit orelse blk: {
             const l = stack_limit_mod.computeStackLimit(stack_limit_mod.INTERP_STACK_HEADROOM);
-            self.native_stack_limit = l;
+            interp_stack_limit = l;
             break :blk l;
         };
         if (limit != 0 and sp <= limit) return Trap.CallStackExhausted;

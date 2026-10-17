@@ -381,6 +381,8 @@ pub const WasiP2Ctx = struct {
         self.http_fields.deinit(self.alloc);
         for (self.http_p2_requests.items) |*r| r.deinit(self.alloc);
         self.http_p2_requests.deinit(self.alloc);
+        // Nothing can be cancelled once the ctx is gone.
+        self.host.http_cancel_target.store(null, .release);
         for (self.http_p2_exchanges.items) |*e| e.deinit(self.alloc);
         self.http_p2_exchanges.deinit(self.alloc);
         for (self.http_requests.items) |*r| r.deinit(self.alloc);
