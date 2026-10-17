@@ -67,7 +67,7 @@ Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写�
 | --- | --- | --- | --- |
 | host fn 错误归一化 | `987bbfec8`（部分） | `zwasm/host_func_marshal.zig` 的 `hostFnError`；`zwasm/instance.zig` 的 `mapDispatchErr` | **#519 已由上游 `f45dad90d` 修** |
 | 大帧 JIT decline | `f8183217d` | `platform/stack_limit.zig`（headroom 1 MiB）+ `engine/codegen/{x86_64,arm64}/emit.zig` 的 prologue decline + `codegen/shared/decline_note.zig` | #495（open） |
-| thunk 武装 | `987bbfec8`（后半） | 三个 mixed multi-result thunk + `invokeBufferWrite` 的 `ensureInstalled()` + `stack_limit` | #302（open） |
+| thunk 武装 | `987bbfec8`（后半） | 三个 mixed multi-result thunk + `invokeBufferWrite` 的 `ensureInstalled()` + `stack_limit` | #302（open）→ **上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 已提交**（2026-10-17，按 0.16 重写；等维护者放行 CI）。**合并后删掉 fork 这一半** |
 | 跨线程中断 | `4f8f79605` | `zwasm/instance.zig:interrupt`（上游已有）+ `api/component.zig` 的 `Opened.interrupt`/`ComponentInstance.interrupt` + `api/component_wasi_p2.zig` 的 `BuiltComponent.interrupt` | 新（无 issue） |
 | 泛化宿主 IO 取消 | `4f8f79605` | `wasi/host.zig` 的注册表（`registerHostCancel`/`unregisterHostCancel`/`cancelHostIo`）+ `component_wasi_p2_http.zig` 的注册调用点 | 新（无 issue） |
 | 时钟等待可中断 | `4f8f79605` | `component_wasi_ctx.zig:p2WaitDeadlineSync` 切片 + `Host.clocks_wait_max_ns` | 新（无 issue） |
@@ -81,6 +81,11 @@ Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写�
 
 **同步节奏建议**：每次上游 rebase 后回头核对本表 —— 上游修掉的候选（如 #519）立即从表中删除，
 并删掉 fork 里对应的那部分（`p3` 的前半就是这么消失的）。
+
+**探针 PR**：`#563`（thunk 武装 / #302）是**第一发**，用途是先探上游维护者对这类贡献的态度。
+观察顺序：① 维护者是否**批准 workflow 运行**（fork 首次贡献者默认 `action_required`，单这一步就说明
+他们愿意看）；② 是否有 review 意见；③ 若长期无回应，则默认「不欢迎」，**停止再开新 PR**，改为继续在
+fork 里积累（本表的候选不丢，随时可再发）。在 #563 有信号之前，**不要开第二发**。
 
 ## 需要发到上游的内容（issue 文案见 zwasm-fork-plan.md 附录）
 
