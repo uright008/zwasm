@@ -2172,3 +2172,96 @@ test "wasi:http@0.2.x: a real wasip2 client GETs from a loopback server" {
     // `close` returns nothing, so invokeTyped yields null here.
     _ = try opened.invokeTyped("snooze:direct-http/api@0.1.0#close", &.{}, testing.allocator);
 }
+
+/// Server state for the streaming proof: `second_sent` flips only after the
+/// first chunk has been sitting on the wire for a while.
+/// The guest's `read` returns `list<u8>`; compare it in place (no allocation).
+fn expectListEquals(expected: []const u8, list: []const component.ComponentValue) !void {
+    try std.testing.expectEqual(expected.len, list.len);
+    for (expected, list) |e, v| try std.testing.expectEqual(e, v.u8);
+}
+
+const SlowHttpServer = struct {
+    second_sent: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+/// Sends headers + "first-" immediately, waits, then sends "second". A host
+/// that buffers the whole body before `handle` returns cannot deliver the first
+/// chunk while `second_sent` is still false.
+fn slowHttpServer(io: std.Io, server: *std.Io.net.Server, state: *SlowHttpServer) void {
+    var conn = server.accept(io) catch return;
+    defer conn.close(io);
+    var buf: [2048]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        var bufs = [_][]u8{buf[n..]};
+        const got = conn.read(io, &bufs) catch return;
+        if (got == 0) break;
+        n += got;
+        if (std.mem.find(u8, buf[0..n], "\r\n\r\n") != null) break;
+    }
+    var wbuf: [512]u8 = undefined;
+    var w = conn.writer(io, &wbuf);
+    w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nfirst-") catch return;
+    w.interface.flush() catch return;
+    io.sleep(.{ .nanoseconds = 300 * std.time.ns_per_ms }, .awake) catch return;
+    state.second_sent.store(true, .release);
+    w.interface.writeAll("second") catch return;
+    w.interface.flush() catch return;
+}
+
+test "wasi:http@0.2.x: the body streams — the guest reads before the server finishes" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_p2_client.wasm", testing.allocator, .limited(1 << 22));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var state: SlowHttpServer = .{};
+    var server_fut = try io.concurrent(slowHttpServer, .{ io, &server, &state });
+    defer server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/x", .{port});
+    defer testing.allocator.free(url);
+
+    const open_name = "snooze:direct-http/api@0.1.0#open";
+    const read_name = "snooze:direct-http/api@0.1.0#read";
+    const status = (try opened.invokeTyped(open_name, &.{.{ .string = url }}, testing.allocator)).?;
+    defer status.deinit(testing.allocator);
+    try testing.expect(status == .result and status.result.is_ok);
+    try testing.expectEqual(@as(u16, 200), status.result.payload.?.u16);
+
+    // The first chunk is available while the server still holds the rest: that
+    // is the difference between streaming and buffering the whole body.
+    const first = (try opened.invokeTyped(read_name, &.{.{ .u64 = 64 }}, testing.allocator)).?;
+    defer first.deinit(testing.allocator);
+    try testing.expect(first == .result and first.result.is_ok);
+    try expectListEquals("first-", first.result.payload.?.list);
+    try testing.expect(!state.second_sent.load(.acquire));
+
+    const second = (try opened.invokeTyped(read_name, &.{.{ .u64 = 64 }}, testing.allocator)).?;
+    defer second.deinit(testing.allocator);
+    try testing.expect(second == .result and second.result.is_ok);
+    try expectListEquals("second", second.result.payload.?.list);
+
+    // EOF: the guest maps `stream-error::closed` to an empty list.
+    const eof = (try opened.invokeTyped(read_name, &.{.{ .u64 = 64 }}, testing.allocator)).?;
+    defer eof.deinit(testing.allocator);
+    try testing.expect(eof == .result and eof.result.is_ok);
+    try testing.expectEqual(@as(usize, 0), eof.result.payload.?.list.len);
+
+    _ = try opened.invokeTyped("snooze:direct-http/api@0.1.0#close", &.{}, testing.allocator);
+}

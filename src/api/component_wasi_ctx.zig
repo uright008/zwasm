@@ -84,8 +84,9 @@ pub const PendingClientSend = struct {
 /// the guest through the body `input-stream`.
 pub const HttpP2Exchange = struct {
     status: u16 = 0,
-    body: []u8 = &.{},
-    body_pos: usize = 0,
+    /// The live connection; null before `handle` succeeds and after the body
+    /// finishes or the reader is dropped.
+    transfer: ?*@import("component_wasi_p2_http.zig").Transfer = null,
     /// `[method]incoming-body.stream` mints the reader once (the WIT says the
     /// call consumes the body).
     stream_taken: bool = false,
@@ -94,8 +95,8 @@ pub const HttpP2Exchange = struct {
     retrieved: bool = false,
 
     pub fn deinit(self: *HttpP2Exchange, alloc: std.mem.Allocator) void {
-        if (self.body.len != 0) alloc.free(self.body);
-        self.body = &.{};
+        if (self.transfer) |t| t.destroy(alloc);
+        self.transfer = null;
     }
 };
 

@@ -5,11 +5,13 @@
 //! `request-options`, `outgoing-handler.handle`, `future-incoming-response`,
 //! `incoming-response` and `incoming-body`, plus the body `input-stream`.
 //!
-//! The exchange runs eagerly with a bounded body buffer, and the socket is
-//! closed before `handle` returns, so the body is served from host memory.
-//! Not in this slice (next): a lazy reader that streams from the live
-//! connection, request bodies (`outgoing-body`), trailers, response headers,
-//! and the server-side resources.
+//! `handle` connects, sends and reads the response head, then leaves the
+//! connection open: the guest's `input-stream.read` pulls body bytes on demand
+//! through a fixed 16 KiB transfer buffer, so a response of any size streams
+//! without a host-side copy of it. Not in this slice (next): request bodies
+//! (`outgoing-body`), trailers, response headers, real readiness for the
+//! non-blocking `read`, timeouts and cancellation, and the server-side
+//! resources.
 //!
 //! Encoding note: p2 handles are 32-bit, so a variant payload starts at +4
 //! (`result<own<T>, error-code>` writes the handle at +4, the error-code
@@ -27,10 +29,6 @@ const Allocator = std.mem.Allocator;
 const WasiP2Ctx = ctx_mod.WasiP2Ctx;
 const WasiP2Error = ctx_mod.WasiP2Error;
 const Memory = ctx_mod.Memory;
-
-/// Bounded response body. A larger body fails the call with `internal-error`
-/// instead of buffering without limit; the lazy-reader slice removes the cap.
-pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// The exchange state lives in `WasiP2Ctx` (`HttpP2Exchange`) so the resource
 /// table, the ctx deinit and this module all speak about one type.
@@ -209,21 +207,44 @@ pub fn p2HttpOutgoingHandlerHandle(caller: *Caller, request: u32, opt_disc: u32,
     const idx: u32 = @intCast(ctx.http_p2_exchanges.items.len);
     ctx.http_p2_exchanges.append(ctx.alloc, .{}) catch return WasiP2Error.OutOfMemory;
     const ex = &ctx.http_p2_exchanges.items[idx];
-    performExchange(ctx, req, opts, ex) catch {
+    var status: u16 = 0;
+    ex.transfer = startTransfer(ctx, req, opts, &status) catch {
         return writeInternalError(mem, retptr);
     };
+    ex.status = status;
 
     const handle = ctx.resources.new(WasiP2Ctx.HTTP_P2_FUTURE_RT, idx) catch return WasiP2Error.OutOfMemory;
     try mem.write(retptr, @as(u8, 0)); // ok
     try mem.write(retptr + 8, handle); // error-code's option<u64> case aligns the payload to 8
 }
 
-/// The transport: one blocking exchange, bounded body buffering. The scheme is
-/// honoured (`std.http.Client` does verified TLS for `https`), the authority
-/// and path come from the request, and headers are copied from the fields
-/// resource minus `content-length` (the std client computes it).
-fn performExchange(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpRequestOptions, ex: *Exchange) !void {
-    _ = opts; // timeouts land with the lazy-reader slice (they need a deadline loop)
+/// A live exchange. `handle` leaves the connection open and the guest's
+/// `input-stream.read` pulls body bytes from it on demand.
+///
+/// Everything lives in ONE heap allocation because the std client's pointers
+/// are self-referential: `Response` borrows `request`, `head_buf` backs the
+/// response head, and the `Reader` from `Response.reader` points into the
+/// connection. None of them may move, so the transfer is never stored by value
+/// in a reallocating list.
+pub const Transfer = struct {
+    client: std.http.Client,
+    request: std.http.Client.Request,
+    response: std.http.Client.Response,
+    reader: *std.Io.Reader,
+    head_buf: [8192]u8 = undefined,
+    transfer_buf: [16 * 1024]u8 = undefined,
+
+    pub fn destroy(self: *Transfer, alloc: Allocator) void {
+        // LIFO of the eager path: request (closes the connection) then client.
+        self.request.deinit();
+        self.client.deinit();
+        alloc.destroy(self);
+    }
+};
+
+/// Connect, send, read the response head. The body is left unread.
+fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpRequestOptions, status_out: *u16) !*Transfer {
+    _ = opts; // timeouts land with the deadline slice
     const io = ctx_mod.ctxIo(ctx) catch return error.NoHostIo;
     const alloc = ctx.alloc;
 
@@ -259,32 +280,22 @@ fn performExchange(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpR
         }
     }
 
-    var client: std.http.Client = .{ .allocator = alloc, .io = io };
-    defer client.deinit();
+    const t = try alloc.create(Transfer);
+    errdefer alloc.destroy(t);
+    t.client = .{ .allocator = alloc, .io = io };
+    errdefer t.client.deinit();
 
     const uri = try std.Uri.parse(url);
-    var hreq = try client.request(method, uri, .{ .extra_headers = extra.items });
-    defer hreq.deinit();
-    try hreq.sendBodiless();
-    var head_buf: [8192]u8 = undefined;
-    var hresp = try hreq.receiveHead(&head_buf);
+    t.request = try t.client.request(method, uri, .{ .extra_headers = extra.items });
+    errdefer t.request.deinit();
+    try t.request.sendBodiless();
 
-    ex.status = @intCast(@intFromEnum(hresp.head.status));
-
-    var transfer_buf: [16 * 1024]u8 = undefined;
-    const rdr = hresp.reader(&transfer_buf);
-    var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(alloc);
-    while (true) {
-        const chunk = rdr.peekGreedy(1) catch |e| switch (e) {
-            error.EndOfStream => break,
-            else => return e,
-        };
-        if (body.items.len + chunk.len > MAX_BODY_BYTES) return error.BodyTooLarge;
-        try body.appendSlice(alloc, chunk);
-        rdr.toss(chunk.len);
-    }
-    ex.body = try body.toOwnedSlice(alloc);
+    t.response = try t.request.receiveHead(&t.head_buf);
+    // Read the status BEFORE the body stream is initialized: `reader()`
+    // invalidates the head's string pointers.
+    status_out.* = @intCast(@intFromEnum(t.response.head.status));
+    t.reader = t.response.reader(&t.transfer_buf);
+    return t;
 }
 
 // ============================================================
@@ -366,29 +377,39 @@ pub fn p2HttpIncomingBodyStream(caller: *Caller, self: u32, retptr: u32) WasiP2E
     try mem.write(retptr + 4, stream);
 }
 
-/// Body `input-stream.read` / `blocking-read`: serve from the buffered body,
-/// `stream-error::closed` at the end. Nothing blocks, so the two variants are
-/// the same host path.
+/// Body `input-stream.read` / `blocking-read`: pull from the live connection.
+/// `peekGreedy(1)` blocks until at least one byte or EOF — so both variants
+/// take the same host path, and the guest sees `stream-error::closed` at the
+/// end. Leftover bytes stay in the reader's transfer buffer for the next call.
 pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32) WasiP2Error!void {
     const ex = try exchangeOf(ctx, rep);
     const want: usize = @intCast(@min(len, std.math.maxInt(u32)));
-    const remaining = ex.body[ex.body_pos..];
-    const n = @min(want, remaining.len);
-    if (n == 0) {
-        try mem.write(retptr, @as(u8, 1)); // err
-        try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed
-        return;
-    }
+    const t = ex.transfer orelse return writeStreamClosed(mem, retptr);
+    if (want == 0) return writeStreamClosed(mem, retptr);
+
+    const chunk = t.reader.peekGreedy(1) catch |e| switch (e) {
+        error.EndOfStream => {
+            ex.deinit(ctx.alloc); // body finished: close the connection
+            return writeStreamClosed(mem, retptr);
+        },
+        else => return WasiP2Error.ReadFailed,
+    };
+    const n = @min(want, chunk.len);
     const ptr = try ctx.reallocGuest(@intCast(n), 1);
-    @memcpy(mem.sliceAt(ptr, @intCast(n)) catch return WasiP2Error.OutOfBounds, remaining[0..n]);
-    ex.body_pos += n;
+    @memcpy(mem.sliceAt(ptr, @intCast(n)) catch return WasiP2Error.OutOfBounds, chunk[0..n]);
+    t.reader.toss(n);
     try mem.write(retptr, @as(u8, 0)); // ok
     try mem.write(retptr + 4, ptr);
     try mem.write(retptr + 8, @as(u32, @intCast(n)));
 }
 
-/// Drop-side cleanup for the exchange-backed handles. Called from
-/// `p2ResourceDrop`; the body buffer is released once the reader is gone.
+fn writeStreamClosed(mem: Memory, retptr: u32) WasiP2Error!void {
+    try mem.write(retptr, @as(u8, 1)); // err
+    try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed
+}
+
+/// Drop-side cleanup for the exchange-backed handles. The body reader owns the
+/// live transfer, so dropping it closes the connection and frees the transfer.
 pub fn dropExchangeHandle(ctx: *WasiP2Ctx, rt: u32, rep: u32) void {
     if (rep >= ctx.http_p2_exchanges.items.len) return;
     if (rt == WasiP2Ctx.HTTP_P2_BODY_STREAM_RT) {
