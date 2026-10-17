@@ -830,7 +830,7 @@ pub fn p2HttpFieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32,
     var fields: p3http.HttpFields = .{};
     var i: u32 = 0;
     while (i < entries_len) : (i += 1) {
-        const rec = entries_ptr + i * 16; // tuple<field-name, field-value> = 2 strings
+        const rec = try ctx_mod.guestPtr(entries_ptr, try ctx_mod.listBytesOf(16, i)); // tuple<field-name, field-value> = 2 strings
         const name = mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4)) catch return WasiP2Error.OutOfBoundsLoad;
         const value = mem.sliceAt(try mem.read(u32, rec + 8), try mem.read(u32, rec + 12)) catch return WasiP2Error.OutOfBoundsLoad;
         fields.appendChecked(ctx.alloc, name, value) catch |e| {
@@ -876,7 +876,7 @@ pub fn p2HttpFieldsSet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32,
     defer values.deinit(ctx.alloc);
     var i: u32 = 0;
     while (i < values_len) : (i += 1) {
-        const rec = values_ptr + i * 8; // list<field-value>
+        const rec = try ctx_mod.guestPtr(values_ptr, try ctx_mod.listBytesOf(8, i)); // list<field-value>
         const v = mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4)) catch return WasiP2Error.OutOfBoundsLoad;
         values.append(ctx.alloc, v) catch return WasiP2Error.OutOfMemory;
     }
@@ -913,7 +913,7 @@ pub fn p2HttpFieldsEntries(caller: *Caller, self: u32, retptr: u32) WasiP2Error!
     const mem = try ctx_mod.ctxMemory(caller);
     const fields = try p3h.http3FieldsSelf(ctx, self);
     const n = fields.entries.items.len;
-    const base = if (n == 0) 4 else try ctx.reallocGuest(@intCast(n * 16), 4);
+    const base = if (n == 0) 4 else try ctx.reallocGuest(try ctx_mod.listBytesOf(16, @intCast(n)), 4);
     for (fields.entries.items, 0..) |p, i| {
         const rec = base + @as(u32, @intCast(i * 16));
         try mem.write(rec, try p3h.http3AllocBlob(ctx, mem, p.name));

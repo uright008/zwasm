@@ -509,7 +509,7 @@ pub const WasiP2Ctx = struct {
                     const idx: u32 = @intCast(self.tcp_sockets.items.len);
                     self.tcp_sockets.append(self.alloc, conn) catch return WasiP2Error.OutOfMemory;
                     const nh = try self.resources.new(TCP_SOCKET_RT, idx);
-                    try mem.write(pr.ptr + filled * 4, nh);
+                    try mem.write(try guestPtr(pr.ptr, try listBytesOf(4, filled)), nh);
                     filled += 1;
                 }
                 if (filled == 0) continue; // spurious readiness — stay parked
@@ -904,6 +904,33 @@ pub fn p2WaitableJoin(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Err
 /// host-side failure (`NoMemory`, `ReallocFailed`, `NoHostIo`, …) stays outside
 /// the trap set, so `hostFnError` names it `HostTrap`. `OutOfMemory` sits in
 /// both tables' sets but is already a trap name.
+/// Byte size of a guest list of `n` elements of `T`, or the guest's memory trap
+/// when the product cannot be represented.
+///
+/// Checked on purpose. Wrapping (what a release build of most languages does by
+/// default) is the dangerous option here: a wrapped size passes the bounds check
+/// and the host then writes `n` elements into a short buffer. Panicking is the
+/// other wrong answer — guest input must not abort the host. The ABI's answer is
+/// the memory trap, which is exactly what a size the address space cannot hold
+/// is.
+pub fn listBytes(comptime T: type, n: u32) WasiP2Error!u32 {
+    return listBytesOf(@sizeOf(T), n);
+}
+
+/// The same for an element that has no single Zig type (a 12-byte tuple, an
+/// 18-byte address variant): the caller states the size.
+pub fn listBytesOf(comptime elem_size: u32, n: u32) WasiP2Error!u32 {
+    return std.math.mul(u32, n, elem_size) catch WasiP2Error.OutOfBoundsStore;
+}
+
+/// `base + off` in the guest's address space, or the guest's memory trap when it
+/// wraps. Every element pointer derived from a GUEST-PROVIDED base goes through
+/// this: an unchecked add wraps to a low address, and the host would then read or
+/// write the wrong bytes without ever leaving the checked memory helpers.
+pub fn guestPtr(base: u32, off: u32) WasiP2Error!u32 {
+    return std.math.add(u32, base, off) catch WasiP2Error.OutOfBoundsLoad;
+}
+
 pub fn mapGuestFault(e: anyerror) anyerror {
     if (e == error.OutOfMemory) return e;
     const TableError = resource_table.Error || async_mod.Error;
@@ -1440,4 +1467,20 @@ test "clocks wait: a retiring host stops the wait instead of parking the thread"
     const elapsed_ms = @divTrunc(std.Io.Timestamp.now(io, .boot).toNanoseconds() - t0, std.time.ns_per_ms);
     try std.testing.expect(elapsed_ms < 1000);
     closer.join();
+}
+
+test "arith: listBytes and guestPtr turn overflow into the memory trap" {
+    const testing = std.testing;
+    // In range: the real byte size.
+    try testing.expectEqual(@as(u32, 40), try listBytes(u32, 10));
+    try testing.expectEqual(@as(u32, 16), try listBytesOf(16, 1));
+    try testing.expectEqual(@as(u32, 0), try listBytesOf(16, 0));
+    // Out of range: the guest's memory trap, never a wrap and never a panic.
+    try testing.expectError(error.OutOfBoundsStore, listBytesOf(4, 0x4000_0000));
+    try testing.expectError(error.OutOfBoundsStore, listBytesOf(16, 0x1000_0000));
+    try testing.expectError(error.OutOfBoundsStore, listBytes(u64, 0x8000_0000));
+
+    // A guest base plus an offset that wraps is out of bounds, not a low address.
+    try testing.expectEqual(@as(u32, 16), try guestPtr(8, 8));
+    try testing.expectError(error.OutOfBoundsLoad, guestPtr(0xFFFF_FFF0, 0x20));
 }

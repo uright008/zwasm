@@ -2841,3 +2841,22 @@ test "interrupt: a looping guest call stops with error.Interrupted" {
     try testing.expect(outcome.other == null);
     try testing.expect(elapsed_ms < 1000); // the flag stops it promptly
 }
+
+test "arith: a list length whose byte size overflows traps, and does not abort the host" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // `poll(in: list<borrow<pollable>>)` with in_len = 0x4000_0000: 4 bytes per
+    // element does not fit in u32. Before the checked arithmetic this panicked
+    // (integer overflow) and took the process with it.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/poll_huge_len.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    try testing.expectError(error.OutOfBoundsStore, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
+}

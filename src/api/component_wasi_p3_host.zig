@@ -743,7 +743,7 @@ fn fs3DirStreamRead(ctx: *WasiP2Ctx, state_index: u32, end: *async_mod.StreamFut
             const src = try mem.sliceAt(buf_ptr + 24, d_namlen);
             @memcpy(dest, src);
         }
-        const rec = ptr + filled * 24;
+        const rec = try ctx_mod.guestPtr(ptr, try ctx_mod.listBytesOf(24, filled));
         const p1_ft: wasi_p1.Filetype = @enumFromInt(d_type);
         try writeFs3DescriptorType(mem, rec, p1_ft);
         try mem.write(rec + 16, name_ptr);
@@ -1500,7 +1500,7 @@ fn http3FieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32, retp
     var fields: p3http.HttpFields = .{};
     var i: u32 = 0;
     while (i < entries_len) : (i += 1) {
-        const rec = entries_ptr + i * 16;
+        const rec = try ctx_mod.guestPtr(entries_ptr, try ctx_mod.listBytesOf(16, i));
         const name = try mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4));
         const value = try mem.sliceAt(try mem.read(u32, rec + 8), try mem.read(u32, rec + 12));
         if (dbg.on("async.host")) std.debug.print("[host] fields.from-list [{d}] name='{s}' value='{s}'\n", .{ i, name, value });
@@ -1535,7 +1535,7 @@ pub fn http3AllocBlob(ctx: *WasiP2Ctx, mem: Memory, bytes: []const u8) WasiP2Err
 /// Marshal `list<field-value>`: the elem table is one allocation, each
 /// value another (see `http3AllocBlob`); (ptr,len) lands at `retptr`.
 pub fn http3WriteValueList(ctx: *WasiP2Ctx, mem: Memory, retptr: u32, values: []const []const u8) WasiP2Error!void {
-    const base = if (values.len == 0) 4 else try ctx.reallocGuest(@intCast(values.len * 8), 4);
+    const base = if (values.len == 0) 4 else try ctx.reallocGuest(try ctx_mod.listBytesOf(8, @intCast(values.len)), 4);
     for (values, 0..) |v, i| {
         const p = try http3AllocBlob(ctx, mem, v);
         const rec = base + @as(u32, @intCast(i * 8));
@@ -1574,7 +1574,7 @@ fn http3FieldsSet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, valu
     defer values.deinit(ctx.alloc);
     var i: u32 = 0;
     while (i < values_len) : (i += 1) {
-        const rec = values_ptr + i * 8;
+        const rec = try ctx_mod.guestPtr(values_ptr, try ctx_mod.listBytesOf(8, i));
         const v = try mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4));
         values.append(ctx.alloc, v) catch return WasiP2Error.OutOfMemory;
     }
@@ -1627,7 +1627,7 @@ fn http3FieldsCopyAll(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void 
     // Elem table = one allocation; each name string and value list its own
     // (per-element buffer ownership — see http3AllocBlob).
     const items = fields.entries.items;
-    const base = if (items.len == 0) 4 else try ctx.reallocGuest(@intCast(items.len * 16), 4);
+    const base = if (items.len == 0) 4 else try ctx.reallocGuest(try ctx_mod.listBytesOf(16, @intCast(items.len)), 4);
     for (items, 0..) |p, i| {
         const np = try http3AllocBlob(ctx, mem, p.name);
         const vp = try http3AllocBlob(ctx, mem, p.value);
@@ -2364,7 +2364,7 @@ fn sock3ResolveAddresses(caller: *Caller, name_ptr: u32, name_len: u32, retptr: 
     };
     // ok: list<ip-address>; ip-address variant = disc u8@0, payload@2
     // (ipv4 4×u8 / ipv6 8×u16-le) → elem size 18 align 2.
-    const base = try ctx.reallocGuest(@intCast(n * 18), 2);
+    const base = try ctx.reallocGuest(try ctx_mod.listBytesOf(18, @intCast(n)), 2);
     for (addrs[0..n], 0..) |a, i| {
         const elem_ptr = base + @as(u32, @intCast(i * 18));
         switch (a) {

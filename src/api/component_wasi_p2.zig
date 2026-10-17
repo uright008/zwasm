@@ -577,7 +577,7 @@ pub fn p2GetDirectories(caller: *Caller, retptr: u32) WasiP2Error!void {
     const preopens = ctx.host.preopens;
     const n: u32 = @intCast(preopens.len);
     // Each list element is a tuple (descriptor handle i32, str_ptr i32, str_len i32) = 12 bytes.
-    const list_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n * 12, 4);
+    const list_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(try ctx_mod.listBytesOf(12, n), 4);
     for (preopens, 0..) |p, i| {
         const wfd = preopenWasiFd(ctx.host, p.host_fd) orelse return WasiP2Error.WriteFailed;
         const handle = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, wfd);
@@ -1019,14 +1019,14 @@ fn p2PollableBlock(caller: *Caller, self_handle: u32) WasiP2Error!void {
 fn p2Poll(caller: *Caller, in_ptr: u32, in_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const data_ptr: u32 = if (in_len == 0) 0 else try ctx.reallocGuest(in_len * 4, 4);
+    const data_ptr: u32 = if (in_len == 0) 0 else try ctx.reallocGuest(try ctx_mod.listBytesOf(4, in_len), 4);
     var waited: u32 = 0;
     while (true) {
         var ready_n: u32 = 0;
         var capped = true;
         var i: u32 = 0;
         while (i < in_len) : (i += 1) {
-            const h = try ctx.resources.peek(try mem.read(u32, in_ptr + i * 4));
+            const h = try ctx.resources.peek(try mem.read(u32, try ctx_mod.guestPtr(in_ptr, i * 4)));
             const is_ready = pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch;
             if (h.rt == WasiP2Ctx.STDIN_POLLABLE_RT) capped = false;
             if (is_ready) {
@@ -1072,7 +1072,7 @@ fn p2GetArguments(caller: *Caller, retptr: u32) WasiP2Error!void {
     const mem = try ctxMemory(caller);
     const args = ctx.host.args;
     const n: u32 = @intCast(args.len);
-    const list_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n * 8, 4);
+    const list_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(try ctx_mod.listBytesOf(8, n), 4);
     for (args, 0..) |arg, i| {
         const str = try allocGuestString(ctx, mem, arg);
         const elem = list_ptr + @as(u32, @intCast(i)) * 8;
@@ -1090,7 +1090,7 @@ fn p2GetEnvironment(caller: *Caller, retptr: u32) WasiP2Error!void {
     const mem = try ctxMemory(caller);
     const envs = ctx.host.envs;
     const n: u32 = @intCast(envs.len);
-    const list_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n * 16, 4);
+    const list_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(try ctx_mod.listBytesOf(16, n), 4);
     for (envs, 0..) |e, i| {
         const k = try allocGuestString(ctx, mem, e.key);
         const v = try allocGuestString(ctx, mem, e.value);
