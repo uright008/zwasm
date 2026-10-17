@@ -169,6 +169,25 @@ git rebase --onto origin/main <上一次的基点> zig-0.18-port
 - 冒烟：`./zig-out/bin/zwasm run --invoke add=2,40 <core.wasm>`、`./zig-out/bin/zwasm run test/component/wasi_p2_hello.wasm`。
 - 进程存活：`./zig-out/bin/zwasm run test/component/invalid_pollable.wasm` 必须 exit 1（HostTrap），**不得** SIGABRT。
 
+## 跨架构验证（aarch64 macOS，2026-10-18）
+
+首次把 fork 的 gate 搬到 Apple M6 / macOS 27.0.1 上跑（Zig `0.18.0-dev.253+16d31ceed`
+aarch64-macos + wasm-tools 1.262.0，`~/zwork/fork` @ `4d5d4eb`）。**spec 语料与 x86_64 Linux
+逐项一致**（wasm 1.0 212/0、2.0 25543/0、threads 294/0、组件模型 170/0、wasm 3.0 interp
+14579/0、jit 8 个已知 #378、边界用例 242/0）——0.18 移植与全部改动架构中立。
+
+两个 macOS 侧发现（**都不是 fork 的代码问题，未改动**）：
+
+1. **Debug 单元套件在 macOS arm64 上必挂**：std 的 Mach-O 回溯器在
+   `SafeAllocator.captureStackTrace` → `SelfInfo.MachO.unwindFrameInner` 里 `switch on corrupt
+   value`，随后 panic 路径死锁（`MachO.findModule` → `Io.Mutex.lock`）。Debug 下测试分配器每次
+   free 都抓栈，必踩。**用 `-Doptimize=ReleaseSafe` 绕过**（3419/3432 passed）。值得报给 zig。
+2. **上游测试的 Linux 假设**：`wasi.path.test.path_remove_directory` 的 `a/..` 用例期望
+   `ENOTEMPTY`，而 **macOS 实测 `rmdir("a/..")` 返回 EINVAL**（直接验过）。该测试是上游的、无 OS
+   门控，fork 从未改过 `src/wasi/path.zig`。处理方式待定（OS 门控 / 映射对齐 / 报上游）。
+
+复现：`~/zwork/run-rs.sh`（ReleaseSafe 单元套件）、`~/zwork/run-spec.sh`（spec 语料）。
+
 ## 注意
 
 - `test/component/invalid_pollable.{wat,wasm}` 是本 fork 新增的 fixture（合法组件 + `pollable.ready(999)`），上游没有。
