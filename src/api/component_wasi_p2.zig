@@ -1923,6 +1923,11 @@ pub const BuiltComponent = struct {
         for (self.instances.items) |inst| inst.interrupt();
     }
 
+    /// Clear a prior `interrupt()` on every instance. See `Opened.clearInterrupt`.
+    pub fn clearInterrupt(self: *BuiltComponent) void {
+        for (self.instances.items) |inst| inst.clearInterrupt();
+    }
+
     pub fn deinit(self: *BuiltComponent) void {
         const alloc = self.alloc;
         for (self.instances.items) |p| {

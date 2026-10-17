@@ -77,6 +77,13 @@ pub const ComponentInstance = struct {
         self.core.interrupt();
     }
 
+    /// Clear a prior `interrupt()` so the instance can be invoked again. The
+    /// interrupt flag is sticky by design (a host that interrupted a call must
+    /// say when the instance is usable again).
+    pub fn clearInterrupt(self: *ComponentInstance) void {
+        self.core.clearInterrupt();
+    }
+
     /// ADR-0183 F1 — introspect the typed func exports from the
     /// SELF-DESCRIBING binary (no `.wit` sidecar; CWFS ADR-0135),
     /// including interface-nested funcs path-qualified `<iface>#<func>`.
@@ -504,6 +511,15 @@ pub const Opened = union(enum) {
         switch (self.*) {
             .single => |*ci| ci.interrupt(),
             .wasi => |*bc| bc.interrupt(),
+        }
+    }
+
+    /// Clear a prior `interrupt()` on every instance, so the component can be
+    /// invoked again.
+    pub fn clearInterrupt(self: *Opened) void {
+        switch (self.*) {
+            .single => |*ci| ci.clearInterrupt(),
+            .wasi => |*bc| bc.clearInterrupt(),
         }
     }
 

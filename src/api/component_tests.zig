@@ -2840,6 +2840,13 @@ test "interrupt: a looping guest call stops with error.Interrupted" {
     try testing.expect(outcome.interrupted); // not a hang, not another error
     try testing.expect(outcome.other == null);
     try testing.expect(elapsed_ms < 1000); // the flag stops it promptly
+
+    // The flag is sticky by design: re-invoking without clearing it traps again
+    // immediately, and clearing it makes the instance usable.
+    opened.clearInterrupt();
+    const out = (try opened.invokeTyped("run", &.{}, testing.allocator)).?;
+    defer out.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 7), out.u32);
 }
 
 test "arith: a list length whose byte size overflows traps, and does not abort the host" {
