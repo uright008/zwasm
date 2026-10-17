@@ -715,7 +715,9 @@ fn checkPartialTimeout(reply: []const u8, scheme: p3http.Scheme, body: bool, gue
     const elapsed = started.durationTo(.now(io, .awake)).nanoseconds;
     try testing.expect(elapsed >= 200 * std.time.ns_per_ms);
     try testing.expect(elapsed < 2 * std.time.ns_per_s);
-    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+    // No cancellation target survives the destroy: the generalized registry
+        // is empty once the transfer unregistered itself.
+        try testing.expectEqual(@as(usize, 0), host.host_cancels.items.len);
 }
 
 test "wasi:http@0.2.x: partial response head cannot bypass the host deadline" {
@@ -767,7 +769,7 @@ test "wasi:http@0.2.x: host cancellation interrupts a partial response head" {
     host.cancelHttp();
     try testing.expectError(error.Canceled, pending.await(io));
     try testing.expect(started.durationTo(.now(io, .awake)).nanoseconds < std.time.ns_per_s);
-    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+    try testing.expectEqual(@as(usize, 0), host.host_cancels.items.len);
 }
 
 // ============================================================

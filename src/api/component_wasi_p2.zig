@@ -1917,6 +1917,12 @@ pub const BuiltComponent = struct {
     synth_arena: std.heap.ArenaAllocator,
     built: []?Built,
 
+    /// Stop every instance's running guest call from another thread (the
+    /// interpreter's interrupt flag). See `Opened.interrupt`.
+    pub fn interrupt(self: *BuiltComponent) void {
+        for (self.instances.items) |inst| inst.interrupt();
+    }
+
     pub fn deinit(self: *BuiltComponent) void {
         const alloc = self.alloc;
         for (self.instances.items) |p| {

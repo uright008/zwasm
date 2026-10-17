@@ -2539,7 +2539,9 @@ test "unload barrier: beginClose refuses new calls, cancel unblocks, drain reach
     // 3. Only after the barrier may the component be destroyed; then there is
     // nothing left for a canceller to reach.
     opened.deinit();
-    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+    // No cancellation target survives the destroy: the generalized registry
+        // is empty once the transfer unregistered itself.
+        try testing.expectEqual(@as(usize, 0), host.host_cancels.items.len);
 }
 
 test "wasi:http@0.2.x: the 0.2 fields/options/request surface works" {
@@ -2788,4 +2790,54 @@ test "wasi:http@0.2.x: a refused connection is reported as connection-refused" {
     const fails = out.list;
     for (fails) |f| std.debug.print("[refused-probe] {s}\n", .{f.string});
     try testing.expectEqual(@as(usize, 0), fails.len);
+}
+
+/// Runs one `run` call and records how it ended, so the interrupt test can see
+/// both the error and the fact that it returned at all.
+const LoopOutcome = struct {
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    interrupted: bool = false,
+    other: ?anyerror = null,
+};
+
+fn loopRun(opened: *component.Opened, out: *LoopOutcome) void {
+    const v = opened.invokeTyped("run", &.{}, std.testing.allocator) catch |e| {
+        if (e == error.Interrupted) out.interrupted = true else out.other = e;
+        out.done.store(true, .release);
+        return;
+    };
+    if (v) |val| val.deinit(std.testing.allocator);
+    out.done.store(true, .release);
+}
+
+test "interrupt: a looping guest call stops with error.Interrupted" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/loop_probe.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    var outcome: LoopOutcome = .{};
+    // The interpreter recurses per wasm call, so the call needs a big stack.
+    var worker = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, loopRun, .{ &opened, &outcome });
+    // Let it get into the loop, then stop it from this thread.
+    io.sleep(.{ .nanoseconds = 50 * std.time.ns_per_ms }, .awake) catch {};
+    const t0 = std.Io.Timestamp.now(io, .boot).toNanoseconds();
+    opened.interrupt();
+    worker.join();
+    const elapsed_ms = @divTrunc(std.Io.Timestamp.now(io, .boot).toNanoseconds() - t0, std.time.ns_per_ms);
+
+    try testing.expect(outcome.done.load(.acquire));
+    try testing.expect(outcome.interrupted); // not a hang, not another error
+    try testing.expect(outcome.other == null);
+    try testing.expect(elapsed_ms < 1000); // the flag stops it promptly
 }

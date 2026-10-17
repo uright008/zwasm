@@ -966,12 +966,23 @@ pub fn p2WaitForSync(caller: *Caller, dur_raw: i64) WasiP2Error!void {
 }
 
 fn p2WaitDeadlineSync(ctx: *WasiP2Ctx, deadline_ns: u64) WasiP2Error!void {
-    const now = try ctx.monotonicNowNs();
-    if (deadline_ns <= now) return;
     const io = ctx.host.io orelse return WasiP2Error.NoHostIo;
-    std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(deadline_ns - now)), .awake) catch |err| switch (err) {
-        error.Canceled => {}, // a cancelled sleep just wakes early
-    };
+    // A guest may ask to sleep for years. The host never parks the runtime
+    // thread for the whole span: it waits in slices and re-checks its own
+    // retirement flag between them, so a retiring instance is not stuck behind a
+    // guest's sleep. `Host.clocks_wait_max_ns` caps the total when the daemon
+    // wants a hard bound (null = spec-faithful: wait until the guest's deadline).
+    const slice_ns: u64 = 20 * std.time.ns_per_ms;
+    var remaining = deadline_ns -| (try ctx.monotonicNowNs());
+    if (ctx.host.clocks_wait_max_ns) |cap| remaining = @min(remaining, cap);
+    while (remaining > 0) {
+        if (ctx.host.isClosing()) return;
+        const slice = @min(remaining, slice_ns);
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(slice), .awake) catch |err| switch (err) {
+            error.Canceled => {}, // a cancelled sleep just wakes early
+        };
+        remaining -= slice;
+    }
 }
 
 /// `canon waitable-set.poll` (non-blocking; `CanonicalABI.md`
@@ -1400,4 +1411,33 @@ pub fn p2StreamFutureDrop(caller: *Caller, handle: u32) WasiP2Error!void {
     // (FutureDropBeforeWrite, a guest fault by `mapGuestFault`) + marks the rendezvous
     // DROPPED for the surviving peer (same helper the graph path uses).
     try async_mod.dropEndGuarded(&ctx.streams, &ctx.shared, handle);
+}
+
+test "clocks wait: a retiring host stops the wait instead of parking the thread" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var host = try wasi_host.Host.init(std.testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var ctx = try WasiP2Ctx.init(std.testing.allocator, &host);
+    defer ctx.deinit();
+
+    // Close admission shortly after the wait starts; the wait must yield to it
+    // rather than sleeping out the guest's (an hour long) deadline.
+    const Closer = struct {
+        fn run(h: *wasi_host.Host, i: std.Io) void {
+            i.sleep(.{ .nanoseconds = 50 * std.time.ns_per_ms }, .awake) catch {};
+            h.beginClose();
+        }
+    };
+    var closer = try std.Thread.spawn(.{}, Closer.run, .{ &host, io });
+    defer closer.join();
+
+    const now = try ctx.monotonicNowNs();
+    const t0 = std.Io.Timestamp.now(io, .boot).toNanoseconds();
+    try p2WaitDeadlineSync(&ctx, now + std.time.ns_per_s * 3600);
+    const elapsed_ms = @divTrunc(std.Io.Timestamp.now(io, .boot).toNanoseconds() - t0, std.time.ns_per_ms);
+    try std.testing.expect(elapsed_ms < 1000);
+    closer.join();
 }

@@ -191,9 +191,14 @@ pub const Host = struct {
     /// signals cancellation so blocked network IO returns. The mutex protects
     /// the callback AND its target until the callback returns; an atomic pointer
     /// alone cannot keep a target alive after a canceller has loaded it.
-    http_cancel_mutex: std.Io.Mutex = .init,
-    http_cancel_fn: ?*const fn (*anyopaque) void = null,
-    http_cancel_target: std.atomic.Value(?*anyopaque) = std.atomic.Value(?*anyopaque).init(null),
+    host_cancel_mutex: std.Io.Mutex = .init,
+    /// Every host operation that can block a thread registers itself here while
+    /// it is blocked (an http transfer, a socket connect, a stream read). A
+    /// canceller — a per-plugin deadline, retirement, shutdown — calls
+    /// `cancelHostIo`, which signals all of them so the blocked calls return
+    /// instead of parking the runtime thread. Bounded work: registrations are
+    /// per in-flight operation, not per instance.
+    host_cancels: std.ArrayListUnmanaged(HostCancel) = .empty,
 
     /// Component imports the embedder registers itself (snooze fork). An
     /// interface that is neither a WASI row nor listed here is refused at link
@@ -211,6 +216,13 @@ pub const Host = struct {
     /// the interfaces it contains.
     admission_fn: ?AdmissionFn = null,
     admission_data: ?*anyopaque = null,
+
+    /// Optional host cap on one `wasi:clocks` wait (nanoseconds). Null keeps the
+    /// spec's semantics — wait until the guest's deadline — while the wait still
+    /// happens in slices and still yields to `isClosing`. A daemon that wants a
+    /// hard bound on how long a plugin may park the runtime thread sets this.
+    clocks_wait_max_ns: ?u64 = null,
+
 
     /// In-flight guest calls and the admission flag (snooze fork). The unload
     /// protocol is: `beginClose` (refuse new calls) -> cancel in-flight host IO
@@ -288,34 +300,76 @@ pub const Host = struct {
         return true;
     }
 
+    /// One blocked host operation that can be signalled to stop waiting.
+    pub const HostCancel = struct {
+        target: *anyopaque,
+        callback: *const fn (*anyopaque) void,
+    };
+
     /// Publish a fully initialized cancellation target. The callback must only
     /// signal cancellation; it must not wait for the guest or re-enter this lock.
-    pub fn registerHttpCancel(self: *Host, io: std.Io, target: *anyopaque, callback: *const fn (*anyopaque) void) void {
-        self.http_cancel_mutex.lockUncancelable(io);
-        defer self.http_cancel_mutex.unlock(io);
-        self.http_cancel_fn = callback;
-        self.http_cancel_target.store(target, .release);
+    /// Re-registering the same target replaces its callback.
+    pub fn registerHostCancel(self: *Host, io: std.Io, target: *anyopaque, callback: *const fn (*anyopaque) void) void {
+        self.host_cancel_mutex.lockUncancelable(io);
+        defer self.host_cancel_mutex.unlock(io);
+        for (self.host_cancels.items) |*e| {
+            if (e.target == target) {
+                e.callback = callback;
+                return;
+            }
+        }
+        // An allocation failure costs cancellability, not the operation: the
+        // call still runs and still has its own deadline.
+        self.host_cancels.append(self.alloc, .{ .target = target, .callback = callback }) catch {};
     }
 
     /// On return no canceller can still be using this target, so it may be freed.
-    pub fn unregisterHttpCancel(self: *Host, io: std.Io, target: *anyopaque) void {
-        self.http_cancel_mutex.lockUncancelable(io);
-        defer self.http_cancel_mutex.unlock(io);
-        if (self.http_cancel_target.load(.acquire) == target) {
-            self.http_cancel_target.store(null, .release);
-            self.http_cancel_fn = null;
+    pub fn unregisterHostCancel(self: *Host, io: std.Io, target: *anyopaque) void {
+        self.host_cancel_mutex.lockUncancelable(io);
+        defer self.host_cancel_mutex.unlock(io);
+        for (self.host_cancels.items, 0..) |e, i| {
+            if (e.target == target) {
+                _ = self.host_cancels.swapRemove(i);
+                return;
+            }
         }
     }
 
-    /// Cancel the live p2 http transfer, if any. Safe to call from any thread;
-    /// a no-op when nothing is in flight.
-    pub fn cancelHttp(self: *Host) void {
+    /// Signal every blocked host operation. Safe from any thread.
+    ///
+    /// The lock is held ACROSS the callbacks on purpose: `unregisterHostCancel`
+    /// must not return while a canceller could still be using the target, or the
+    /// target could be freed under a running callback. Callbacks therefore only
+    /// signal (they must not wait, re-enter this lock, or call back into the
+    /// host); every registration in the tree does exactly that.
+    pub fn cancelHostIo(self: *Host) void {
         const io = self.io orelse return;
-        self.http_cancel_mutex.lockUncancelable(io);
-        defer self.http_cancel_mutex.unlock(io);
-        const f = self.http_cancel_fn orelse return;
-        const target = self.http_cancel_target.load(.acquire) orelse return;
-        f(target);
+        self.host_cancel_mutex.lockUncancelable(io);
+        defer self.host_cancel_mutex.unlock(io);
+        for (self.host_cancels.items) |e| e.callback(e.target);
+    }
+
+    /// True once admission is closed (a retirement is in progress). A long host
+    /// wait checks this so a retiring instance is never parked behind a guest's
+    /// sleep.
+    pub fn isClosing(self: *const Host) bool {
+        return self.closing.load(.acquire);
+    }
+
+    // The http path's names predate the generalization; keep them as aliases so
+    // its call sites (and the C API's) stay put.
+    pub fn registerHttpCancel(self: *Host, io: std.Io, target: *anyopaque, callback: *const fn (*anyopaque) void) void {
+        self.registerHostCancel(io, target, callback);
+    }
+
+    pub fn unregisterHttpCancel(self: *Host, io: std.Io, target: *anyopaque) void {
+        self.unregisterHostCancel(io, target);
+    }
+
+    /// Cancel every in-flight host operation (the p2 http transfer included).
+    /// Safe to call from any thread; a no-op when nothing is blocked.
+    pub fn cancelHttp(self: *Host) void {
+        self.cancelHostIo();
     }
 
     /// Construct a Host with stdio fds 0 / 1 / 2 pre-populated.
@@ -330,6 +384,7 @@ pub const Host = struct {
     }
 
     pub fn deinit(self: *Host) void {
+        self.host_cancels.deinit(self.alloc);
         for (self.args) |a| self.alloc.free(a);
         self.alloc.free(self.args);
         for (self.envs) |e| {
@@ -659,6 +714,42 @@ test "wasi:http@0.2.x: unregister waits for a canceller holding the target" {
     try testing.expect(!state.unregistered.isSet());
     state.release.set(io);
     try state.unregistered.wait(io);
-    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+    try testing.expectEqual(@as(usize, 0), host.host_cancels.items.len);
     host.cancelHttp(); // no callback can use the retired target
+}
+
+test "Host.cancelHostIo signals every registered target; unregister stops it" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var host = try Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    const Probe = struct {
+        fired: usize = 0,
+        fn cb(p: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(p));
+            self.fired += 1;
+        }
+    };
+    var a: Probe = .{};
+    var b: Probe = .{};
+    host.registerHostCancel(io, &a, Probe.cb);
+    host.registerHostCancel(io, &b, Probe.cb);
+    host.cancelHostIo();
+    try testing.expectEqual(@as(usize, 1), a.fired);
+    try testing.expectEqual(@as(usize, 1), b.fired);
+
+    // Re-registering a target replaces its callback instead of duplicating it.
+    host.registerHostCancel(io, &a, Probe.cb);
+    host.cancelHostIo();
+    try testing.expectEqual(@as(usize, 2), a.fired);
+    try testing.expectEqual(@as(usize, 2), b.fired);
+
+    // A cancel after unregistering no longer reaches the target.
+    host.unregisterHostCancel(io, &b);
+    host.cancelHostIo();
+    try testing.expectEqual(@as(usize, 3), a.fired);
+    try testing.expectEqual(@as(usize, 2), b.fired);
 }

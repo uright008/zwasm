@@ -70,6 +70,13 @@ pub const ComponentInstance = struct {
     /// (defaults to the conventional `cabi_realloc`).
     realloc_name: []const u8 = "cabi_realloc",
 
+    /// Stop a running guest call from another thread: the interpreter polls its
+    /// interrupt flag every 1024 steps and unwinds with `error.Interrupted`. The
+    /// daemon uses this to enforce a per-plugin deadline.
+    pub fn interrupt(self: *ComponentInstance) void {
+        self.core.interrupt();
+    }
+
     /// ADR-0183 F1 — introspect the typed func exports from the
     /// SELF-DESCRIBING binary (no `.wit` sidecar; CWFS ADR-0135),
     /// including interface-nested funcs path-qualified `<iface>#<func>`.
@@ -487,6 +494,16 @@ pub const Opened = union(enum) {
     pub fn deinit(self: *Opened) void {
         switch (self.*) {
             inline else => |*x| x.deinit(),
+        }
+    }
+
+    /// Stop a running guest call from another thread. Every instance the
+    /// component owns is interrupted, so it works for both shapes: a single
+    /// embedded module and a built graph.
+    pub fn interrupt(self: *Opened) void {
+        switch (self.*) {
+            .single => |*ci| ci.interrupt(),
+            .wasi => |*bc| bc.interrupt(),
         }
     }
 
