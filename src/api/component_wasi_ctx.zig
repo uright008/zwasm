@@ -1459,7 +1459,8 @@ test "clocks wait: a retiring host stops the wait instead of parking the thread"
         }
     };
     var closer = try std.Thread.spawn(.{}, Closer.run, .{ &host, io });
-    defer closer.join();
+    // Joined once, explicitly, below — a `defer join` plus the explicit one is a
+    // double join (UB; it passed locally and aborted the CI runner).
 
     const now = try ctx.monotonicNowNs();
     const t0 = std.Io.Timestamp.now(io, .boot).toNanoseconds();
