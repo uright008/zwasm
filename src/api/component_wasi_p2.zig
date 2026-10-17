@@ -38,7 +38,9 @@ const zir_mod = @import("../ir/zir.zig");
 const build_options = @import("build_options");
 
 const ctx_mod = @import("component_wasi_ctx.zig");
+const diagnostic = @import("../diagnostic/diagnostic.zig");
 const p3h = @import("component_wasi_p3_host.zig");
+const p2http = @import("component_wasi_p2_http.zig");
 
 // Substrate re-exports (compat surface, ADR-0207 I1) + local aliases so the
 // moved trampoline bodies read unchanged.
@@ -240,6 +242,7 @@ fn inStreamReadImpl(caller: *Caller, self_handle: u32, len: u64, retptr: u32, bl
     const mem = try ctxMemory(caller);
     const h = try ctx.resources.peek(self_handle);
     if (h.rt == WasiP2Ctx.SOCK_INPUT_STREAM_RT) return sockStreamRead(ctx, mem, h.rep, len, retptr, blocking);
+    if (h.rt == WasiP2Ctx.HTTP_P2_BODY_STREAM_RT) return p2http.bodyStreamRead(ctx, mem, h.rep, len, retptr, blocking);
     if (h.rt != WasiP2Ctx.INPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
     const n: u32 = @intCast(@min(len, std.math.maxInt(u32)));
     // `read` may not wait: nothing queued on an inherited stdin is ok([]).
@@ -322,6 +325,11 @@ pub fn p2OutStreamWrite(caller: *Caller, self_handle: u32, ptr: u32, len: u32, r
     const mem = try ctxMemory(caller);
     const bytes = try mem.sliceAt(ptr, len);
     const h = try ctx.resources.peek(self_handle);
+    if (h.rt == WasiP2Ctx.HTTP_P2_BODY_OUT_STREAM_RT) {
+        // A request body's output-stream: bytes land in the owning request's
+        // buffer, which `handle` sends once `finish` was called.
+        return p2http.bodyOutStreamWrite(ctx, mem, h.rep, bytes, retptr);
+    }
     if (h.rt == WasiP2Ctx.SOCK_OUTPUT_STREAM_RT) {
         // Socket-backed stream (ADR-0180): send on the connected socket; any
         // send failure surfaces as stream-error::closed (case 1, payload-free
@@ -390,7 +398,10 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
             // Pollables / dir-entry-streams / networks / socket streams /
             // terminals carry no exclusively-owned host fd — only the handle
             // slot is released.
-            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT => {},
+            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT, WasiP2Ctx.HTTP_P2_TRAILERS_RT, WasiP2Ctx.HTTP_P2_OUTGOING_BODY_RT, WasiP2Ctx.HTTP_P2_BODY_POLLABLE_RT => {},
+            // The body's output-stream is a child of the request's body: its
+            // drop is what lets `outgoing-body.finish` proceed.
+            WasiP2Ctx.HTTP_P2_BODY_OUT_STREAM_RT => p2http.dropBodyOutStream(ctx, h.rep),
             // The tcp-socket handle owns the OS socket.
             WasiP2Ctx.TCP_SOCKET_RT => {
                 const sock = ctxTcpSocket(ctx, h.rep) catch return; // slot already gone
@@ -410,6 +421,15 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
             },
             // Borrowed views / plain-value resources: handle slot only.
             WasiP2Ctx.HTTP_FIELDS_VIEW_RT, WasiP2Ctx.HTTP_REQOPTS_RT, WasiP2Ctx.HTTP_REQOPTS_VIEW_RT => {},
+            // wasi:http@0.2.x handles: the request owns its strings; the body
+            // reader owns the buffered response body; the future / response /
+            // body handles share the exchange and own nothing.
+            WasiP2Ctx.HTTP_P2_OUTGOING_REQUEST_RT => {
+                if (h.rep < ctx.http_p2_requests.items.len)
+                    ctx.http_p2_requests.items[h.rep].deinit(ctx.alloc);
+            },
+            WasiP2Ctx.HTTP_P2_BODY_STREAM_RT => p2http.dropExchangeHandle(ctx, h.rt, h.rep),
+            WasiP2Ctx.HTTP_P2_FUTURE_RT, WasiP2Ctx.HTTP_P2_RESPONSE_RT, WasiP2Ctx.HTTP_P2_BODY_RT => {},
             // The response owns its headers fields storage + transferred
             // body ends (same writer-task unblock as the request).
             WasiP2Ctx.HTTP_RESPONSE_RT => {
@@ -580,7 +600,8 @@ pub fn p2GetDirectories(caller: *Caller, retptr: u32) WasiP2Error!void {
 fn p2OutStreamFlush(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle); // validate handle (fd or socket stream)
-    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.SOCK_OUTPUT_STREAM_RT)
+    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.SOCK_OUTPUT_STREAM_RT and
+        h.rt != WasiP2Ctx.HTTP_P2_BODY_OUT_STREAM_RT)
         return resource_table.Error.TypeMismatch;
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok (nothing buffered at this layer)
@@ -933,6 +954,10 @@ fn p2Subscribe(caller: *Caller, self_handle: u32) WasiP2Error!u32 {
     if (h.rt == WasiP2Ctx.SOCK_OUTPUT_STREAM_RT)
         return ctx.resources.new(WasiP2Ctx.SOCK_POLLABLE_RT, (h.rep & 0x00FF_FFFF) | (2 << 24));
     if (h.rt == WasiP2Ctx.INPUT_STREAM_RT) return ctx.resources.new(WasiP2Ctx.STDIN_POLLABLE_RT, 0);
+    // A p2 http body stream is ready when bytes are buffered or the socket has
+    // some, so the guest's `read` will not come back empty.
+    if (h.rt == WasiP2Ctx.HTTP_P2_BODY_STREAM_RT)
+        return ctx.resources.new(WasiP2Ctx.HTTP_P2_BODY_POLLABLE_RT, h.rep);
     return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
 }
 
@@ -955,6 +980,7 @@ fn pollableReady(ctx: *WasiP2Ctx, h: resource_table.ResourceHandle) ?bool {
         WasiP2Ctx.POLLABLE_RT => true,
         WasiP2Ctx.SOCK_POLLABLE_RT => sockPollableReady(ctx, h.rep),
         WasiP2Ctx.STDIN_POLLABLE_RT => wasi_fd.stdinReady(ctx.host),
+        WasiP2Ctx.HTTP_P2_BODY_POLLABLE_RT => p2http.bodyPollableReady(ctx, h.rep),
         else => null,
     };
 }
@@ -1115,6 +1141,12 @@ fn p2CheckWrite(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void
         const writable = sock.ready(p2sock.POLL_OUT) catch false;
         try mem.write(retptr, @as(u8, 0));
         try mem.write(retptr + 8, @as(u64, if (writable) 4096 else 0));
+        return;
+    }
+    if (h.rt == WasiP2Ctx.HTTP_P2_BODY_OUT_STREAM_RT) {
+        // The body buffer accepts up to its cap; report a page at a time.
+        try mem.write(retptr, @as(u8, 0));
+        try mem.write(retptr + 8, @as(u64, 4096));
         return;
     }
     if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
@@ -1446,6 +1478,7 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .clocks_monotonic_get_resolution => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2MonotonicGetResolution, mapGuestFault),
         // insecure shares the secure handler: identical signature, and the host's
         // secure fill over-satisfies the insecure contract (no separate RNG state).
+
         .random_get_bytes, .random_insecure_get_bytes => try defineMapped(lk, module, name, ctx, fn (*Caller, u64, u32) WasiP2Error!void, p2RandomGetBytes, mapGuestFault),
         .out_stream_blocking_flush => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2OutStreamFlush, mapGuestFault),
         .fs_descriptor_read => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u64, u32) WasiP2Error!void, p2DescriptorRead, mapGuestFault),
@@ -1494,89 +1527,6 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .http_p2_future_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureGet, mapGuestFault),
         .http_p2_future_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureSubscribe, mapGuestFault),
         .http_p2_handle => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingHandlerHandle, mapGuestFault),
-        .http_p2_fields_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpFieldsNew, mapGuestFault),
-        .http_p2_reqopts_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpRequestOptionsNew, mapGuestFault),
-        .http_p2_reqopts_connect_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetConnectTimeout, mapGuestFault),
-        .http_p2_reqopts_first_byte_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetFirstByteTimeout, mapGuestFault),
-        .http_p2_reqopts_between_bytes_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetBetweenBytesTimeout, mapGuestFault),
-        .http_p2_outgoing_request_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestNew, mapGuestFault),
-        .http_p2_outgoing_request_set_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetScheme, mapGuestFault),
-        .http_p2_outgoing_request_set_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetAuthority, mapGuestFault),
-        .http_p2_outgoing_request_set_path_with_query => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetPathWithQuery, mapGuestFault),
-        .http_p2_incoming_response_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseStatus, mapGuestFault),
-        .http_p2_incoming_response_consume => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingResponseConsume, mapGuestFault),
-        .http_p2_incoming_body_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingBodyStream, mapGuestFault),
-        .http_p2_future_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureGet, mapGuestFault),
-        .http_p2_future_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureSubscribe, mapGuestFault),
-        .http_p2_handle => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingHandlerHandle, mapGuestFault),
-        .http_p2_fields_from_list => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsFromList, mapGuestFault),
-        .http_p2_fields_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsGet, mapGuestFault),
-        .http_p2_fields_has => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpFieldsHas, mapGuestFault),
-        .http_p2_fields_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsSet, mapGuestFault),
-        .http_p2_fields_delete => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsDelete, mapGuestFault),
-        .http_p2_fields_append => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsAppend, mapGuestFault),
-        .http_p2_fields_entries => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsEntries, mapGuestFault),
-        .http_p2_fields_clone => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFieldsClone, mapGuestFault),
-        .http_p2_reqopts_connect_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsConnectGet, mapGuestFault),
-        .http_p2_reqopts_first_byte_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsFirstByteGet, mapGuestFault),
-        .http_p2_reqopts_between_bytes_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsBetweenBytesGet, mapGuestFault),
-        .http_p2_request_method_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestMethod, mapGuestFault),
-        .http_p2_request_set_method => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetMethod, mapGuestFault),
-        .http_p2_request_scheme_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestScheme, mapGuestFault),
-        .http_p2_request_authority_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestAuthority, mapGuestFault),
-        .http_p2_request_pwq_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestPathWithQuery, mapGuestFault),
-        .http_p2_request_headers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestHeaders, mapGuestFault),
-        .http_p2_fields_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpFieldsNew, mapGuestFault),
-        .http_p2_reqopts_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpRequestOptionsNew, mapGuestFault),
-        .http_p2_reqopts_connect_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetConnectTimeout, mapGuestFault),
-        .http_p2_reqopts_first_byte_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetFirstByteTimeout, mapGuestFault),
-        .http_p2_reqopts_between_bytes_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetBetweenBytesTimeout, mapGuestFault),
-        .http_p2_outgoing_request_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestNew, mapGuestFault),
-        .http_p2_outgoing_request_set_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetScheme, mapGuestFault),
-        .http_p2_outgoing_request_set_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetAuthority, mapGuestFault),
-        .http_p2_outgoing_request_set_path_with_query => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetPathWithQuery, mapGuestFault),
-        .http_p2_incoming_response_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseStatus, mapGuestFault),
-        .http_p2_incoming_response_consume => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingResponseConsume, mapGuestFault),
-        .http_p2_incoming_body_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingBodyStream, mapGuestFault),
-        .http_p2_future_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureGet, mapGuestFault),
-        .http_p2_future_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureSubscribe, mapGuestFault),
-        .http_p2_handle => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingHandlerHandle, mapGuestFault),
-        .http_p2_fields_from_list => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsFromList, mapGuestFault),
-        .http_p2_fields_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsGet, mapGuestFault),
-        .http_p2_fields_has => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpFieldsHas, mapGuestFault),
-        .http_p2_fields_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsSet, mapGuestFault),
-        .http_p2_fields_delete => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsDelete, mapGuestFault),
-        .http_p2_fields_append => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsAppend, mapGuestFault),
-        .http_p2_fields_entries => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsEntries, mapGuestFault),
-        .http_p2_fields_clone => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFieldsClone, mapGuestFault),
-        .http_p2_reqopts_connect_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsConnectGet, mapGuestFault),
-        .http_p2_reqopts_first_byte_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsFirstByteGet, mapGuestFault),
-        .http_p2_reqopts_between_bytes_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsBetweenBytesGet, mapGuestFault),
-        .http_p2_request_method_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestMethod, mapGuestFault),
-        .http_p2_request_set_method => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetMethod, mapGuestFault),
-        .http_p2_request_scheme_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestScheme, mapGuestFault),
-        .http_p2_request_authority_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestAuthority, mapGuestFault),
-        .http_p2_request_pwq_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestPathWithQuery, mapGuestFault),
-        .http_p2_request_headers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestHeaders, mapGuestFault),
-        .http_p2_response_headers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseHeaders, mapGuestFault),
-        .http_p2_body_finish => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingBodyFinish, mapGuestFault),
-        .http_p2_trailers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureTrailersGet, mapGuestFault),
-        .http_p2_trailers_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureTrailersSubscribe, mapGuestFault),
-        .http_p2_fields_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpFieldsNew, mapGuestFault),
-        .http_p2_reqopts_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpRequestOptionsNew, mapGuestFault),
-        .http_p2_reqopts_connect_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetConnectTimeout, mapGuestFault),
-        .http_p2_reqopts_first_byte_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetFirstByteTimeout, mapGuestFault),
-        .http_p2_reqopts_between_bytes_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetBetweenBytesTimeout, mapGuestFault),
-        .http_p2_outgoing_request_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestNew, mapGuestFault),
-        .http_p2_outgoing_request_set_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetScheme, mapGuestFault),
-        .http_p2_outgoing_request_set_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetAuthority, mapGuestFault),
-        .http_p2_outgoing_request_set_path_with_query => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetPathWithQuery, mapGuestFault),
-        .http_p2_incoming_response_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseStatus, mapGuestFault),
-        .http_p2_incoming_response_consume => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingResponseConsume, mapGuestFault),
-        .http_p2_incoming_body_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingBodyStream, mapGuestFault),
-        .http_p2_future_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureGet, mapGuestFault),
-        .http_p2_future_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureSubscribe, mapGuestFault),
-        .http_p2_handle => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingHandlerHandle, mapGuestFault),
         .http_p2_fields_from_list => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsFromList, mapGuestFault),
         .http_p2_fields_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsGet, mapGuestFault),
         .http_p2_fields_has => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpFieldsHas, mapGuestFault),
@@ -1601,45 +1551,7 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .http_p2_request_body => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestBody, mapGuestFault),
         .http_p2_body_write => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingBodyWrite, mapGuestFault),
         .http_p2_outgoing_body_finish => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingBodyFinish, mapGuestFault),
-        .http_p2_fields_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpFieldsNew, mapGuestFault),
-        .http_p2_reqopts_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2http.p2HttpRequestOptionsNew, mapGuestFault),
-        .http_p2_reqopts_connect_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetConnectTimeout, mapGuestFault),
-        .http_p2_reqopts_first_byte_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetFirstByteTimeout, mapGuestFault),
-        .http_p2_reqopts_between_bytes_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, p2http.p2HttpRequestOptionsSetBetweenBytesTimeout, mapGuestFault),
-        .http_p2_outgoing_request_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestNew, mapGuestFault),
-        .http_p2_outgoing_request_set_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetScheme, mapGuestFault),
-        .http_p2_outgoing_request_set_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetAuthority, mapGuestFault),
-        .http_p2_outgoing_request_set_path_with_query => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetPathWithQuery, mapGuestFault),
-        .http_p2_incoming_response_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseStatus, mapGuestFault),
-        .http_p2_incoming_response_consume => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingResponseConsume, mapGuestFault),
-        .http_p2_incoming_body_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpIncomingBodyStream, mapGuestFault),
-        .http_p2_future_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureGet, mapGuestFault),
-        .http_p2_future_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureSubscribe, mapGuestFault),
-        .http_p2_handle => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingHandlerHandle, mapGuestFault),
-        .http_p2_fields_from_list => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsFromList, mapGuestFault),
-        .http_p2_fields_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsGet, mapGuestFault),
-        .http_p2_fields_has => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpFieldsHas, mapGuestFault),
-        .http_p2_fields_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsSet, mapGuestFault),
-        .http_p2_fields_delete => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsDelete, mapGuestFault),
-        .http_p2_fields_append => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsAppend, mapGuestFault),
-        .http_p2_fields_entries => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFieldsEntries, mapGuestFault),
-        .http_p2_fields_clone => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFieldsClone, mapGuestFault),
-        .http_p2_reqopts_connect_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsConnectGet, mapGuestFault),
-        .http_p2_reqopts_first_byte_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsFirstByteGet, mapGuestFault),
-        .http_p2_reqopts_between_bytes_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpRequestOptionsBetweenBytesGet, mapGuestFault),
-        .http_p2_request_method_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestMethod, mapGuestFault),
-        .http_p2_request_set_method => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestSetMethod, mapGuestFault),
-        .http_p2_request_scheme_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestScheme, mapGuestFault),
-        .http_p2_request_authority_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestAuthority, mapGuestFault),
-        .http_p2_request_pwq_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestPathWithQuery, mapGuestFault),
-        .http_p2_request_headers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpOutgoingRequestHeaders, mapGuestFault),
-        .http_p2_response_headers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingResponseHeaders, mapGuestFault),
-        .http_p2_body_finish => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpIncomingBodyFinish, mapGuestFault),
-        .http_p2_trailers_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpFutureTrailersGet, mapGuestFault),
-        .http_p2_trailers_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2http.p2HttpFutureTrailersSubscribe, mapGuestFault),
-        .http_p2_request_body => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingRequestBody, mapGuestFault),
-        .http_p2_body_write => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingBodyWrite, mapGuestFault),
-        .http_p2_outgoing_body_finish => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2http.p2HttpOutgoingBodyFinish, mapGuestFault),
+
         // The wasi:{filesystem,sockets,http}@0.3.0 arms live with the P3 host
         // layer (ADR-0207 registerP3Arms); listing the tags here keeps the
         // switch compile-time exhaustive — a new P3 op fails HERE, loudly.
@@ -1806,7 +1718,13 @@ fn synthDef(arena: Allocator, info: *const ctypes.TypeInfo, built: []const ?Buil
                 if (host.findHostImport(ref.interface, ref.func)) |imp| {
                     return .{ .host_import = imp };
                 }
-                const op = adapter.classifyImport(ref.interface, ref.func, ref.gen) orelse return error.UnsupportedWasiImport;
+                const op = adapter.classifyImport(ref.interface, ref.func, ref.gen) orelse {
+                    // Name the import: "which capability is missing" is the
+                    // first question an embedder asks (the server half of
+                    // wasi:http lands here, for instance).
+                    diagnostic.setDiag(.instantiate, .other, .unknown, "unclassified component import '{s}#{s}' ({t})", .{ ref.interface, ref.func, ref.gen });
+                    return error.UnsupportedWasiImport;
+                };
                 if (l.opts.is_async) return .{ .host_op_async = op };
                 return .{ .host_op = op };
             },

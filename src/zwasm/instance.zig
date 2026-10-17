@@ -664,13 +664,14 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
 /// only in a test that reaches it (#490: a thunk's second spelling of ProcExit).
 /// An embedder's host fn cannot reach the `else`: `host_func_marshal.hostFnError`
 /// narrows its error at the thunk.
-/// D-445: is this error a GUEST fault (bad handle, bad (ptr,len), illegal
-/// drop/cancel sequencing)? The canonical guest trap for those is
-/// `error.Unreachable`, and the check is shared so the list has one home: the
-/// sync trampolines reach `mapDispatchErr`, while host-fn errors are normalized
-/// earlier by the marshal layer's `hostFnError`. Table exhaustion counts as a
-/// guest fault (a guest can leak handles), which is why TableFull is in the
-/// list.
+/// D-445: is this error a GUEST fault (bad handle, illegal drop/cancel
+/// sequencing, a table minted past its cap)? The canonical guest trap is
+/// `error.Unreachable`. Upstream #535 attributes these at REGISTRATION time
+/// (`defineMapped` / `mapGuestFault`) for every trampoline that opts in, and an
+/// unmapped one deliberately keeps the embedder's own error (#535's test says
+/// so), so this predicate is only the fallback for names that reach
+/// `mapDispatchErr` by another path. Memory traps are deliberately NOT here:
+/// `OutOfBoundsLoad` / `OutOfBoundsStore` is the trap the access is.
 pub fn isGuestFault(err: anyerror) bool {
     return switch (err) {
         error.InvalidHandle,
@@ -682,7 +683,6 @@ pub fn isGuestFault(err: anyerror) bool {
         error.InvalidCallbackCode,
         error.FutureDropBeforeWrite,
         error.CopyNotIdle,
-        error.OutOfBounds,
         => true,
         else => false,
     };
@@ -716,11 +716,10 @@ fn mapDispatchErr(err: anyerror) Instance.InvokeError {
         error.OutOfHeap => error.OutOfMemory,
         // preview1 `proc_exit` or p2/p3 `wasi:cli/exit` — a clean unwind (#490).
         error.ProcExit => error.ProcExit,
-        // D-445: a guest that supplies a bad handle, a bad (ptr,len) or illegal
-        // drop/cancel sequencing is at fault, and the canonical guest trap is
-        // `error.Unreachable` (see `isGuestFault`, shared with the host-fn
-        // marshal layer). Anything else is not a guest fault we know how to
-        // attribute. It must still become a trap rather than killing the process
+        // D-445: a guest that supplies a bad handle or breaks drop/cancel
+        // sequencing is at fault, and the canonical guest trap is
+        // `error.Unreachable` (see `isGuestFault`). Anything else is not a
+        // guest fault we know how to attribute. It must still become a trap rather than killing the process
         // — an embedder running untrusted plugins cannot have guest input abort
         // the host — and trap_surface.zig maps HostTrap to a binding error, so
         // real host bugs stay diagnosable instead of silent.

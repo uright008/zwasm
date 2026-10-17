@@ -907,8 +907,10 @@ pub fn p2WaitableJoin(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Err
 pub fn mapGuestFault(e: anyerror) anyerror {
     if (e == error.OutOfMemory) return e;
     const TableError = resource_table.Error || async_mod.Error;
-    inline for (@typeInfo(TableError).error_set.?) |f| {
-        if (e == @field(TableError, f.name)) return error.Unreachable;
+    // 0.18: the error set's names live in `error_names` (null for an inferred
+    // set, which this one is not).
+    inline for (@typeInfo(TableError).error_set.error_names.?) |name| {
+        if (e == @field(TableError, name)) return error.Unreachable;
     }
     return e;
 }

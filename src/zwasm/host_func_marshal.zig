@@ -16,7 +16,6 @@ const _runtime = @import("../runtime/runtime.zig");
 const _value = @import("../runtime/value.zig");
 const _zir = @import("../ir/zir.zig");
 const _caller = @import("caller.zig");
-const _instance = @import("instance.zig");
 
 pub const Caller = _caller.Caller;
 const RuntimeValue = _value.Value;
@@ -137,13 +136,6 @@ const HostFnError = _runtime.Trap || error{ProcExit};
 /// on a name it does not know), so any name outside `HostFnError` becomes `HostTrap`
 /// here — what the C `hostFuncThunk` returns for a callback's trap.
 fn hostFnError(err: anyerror) HostFnError {
-    // D-445: a host fn that failed because the GUEST handed it a bad handle, a
-    // bad (ptr,len) or illegal sequencing is the guest's fault, and the
-    // canonical guest trap is `Unreachable`. This is the choke point that sees
-    // those names now (upstream #519 normalizes host-fn errors here), so the
-    // attribution lives here too — `mapDispatchErr` still narrows the paths
-    // that do not come through a host fn.
-    if (_instance.isGuestFault(err)) return error.Unreachable;
     // 0.18: the error set's names live in `error_names` (null for an inferred
     // set, which this one is not).
     inline for (@typeInfo(HostFnError).error_set.error_names.?) |name| {
