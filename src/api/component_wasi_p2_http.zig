@@ -216,13 +216,15 @@ pub fn p2HttpOutgoingHandlerHandle(caller: *Caller, request: u32, opt_disc: u32,
     ctx.http_p2_exchanges.append(ctx.alloc, .{}) catch return WasiP2Error.OutOfMemory;
     const ex = &ctx.http_p2_exchanges.items[idx];
     var status: u16 = 0;
-    ex.transfer = startTransfer(ctx, req, opts, &status) catch |e| {
+    var headers_rep: ?u32 = null;
+    ex.transfer = startTransfer(ctx, req, opts, &status, &headers_rep) catch |e| {
         // A head that never arrives is the guest-visible `connection-timeout`
         // (ordinal 8); everything else stays the internal-error catch-all.
         if (e == error.ResponseTimeout) return writeErrorCode(mem, retptr, 8);
         return writeInternalError(mem, retptr);
     };
     ex.status = status;
+    ex.headers_rep = headers_rep;
     ex.between_bytes_ns = opts.between_bytes_timeout_ns;
 
     const handle = ctx.resources.new(WasiP2Ctx.HTTP_P2_FUTURE_RT, idx) catch return WasiP2Error.OutOfMemory;
@@ -238,7 +240,30 @@ fn cancelTransfer(target: *anyopaque) void {
 
 /// Drop the transfer. Transfer.destroy unregisters it before freeing anything.
 fn destroyExchange(ctx: *WasiP2Ctx, ex: *Exchange) void {
+    if (ex.headers_rep) |rep| {
+        if (rep < ctx.http_fields.items.len) ctx.http_fields.items[rep].deinit(ctx.alloc);
+        ex.headers_rep = null;
+    }
     ex.deinit(ctx.alloc);
+}
+
+/// Copy the response head's headers into `ctx.http_fields` as an immutable
+/// resource (the WIT says `incoming-response.headers()` is immutable) and
+/// return its index. Runs before the body reader exists, because `reader()`
+/// invalidates the head's slices; the copies belong to the fields entry.
+fn copyResponseHeaders(ctx: *WasiP2Ctx, head: std.http.Client.Response.Head) !u32 {
+    var fields: p3http.HttpFields = .{};
+    errdefer fields.deinit(ctx.alloc);
+    var it = head.iterateHeaders();
+    while (it.next()) |h| {
+        // A header this host cannot represent is skipped rather than failing
+        // the whole response: the guest still gets the status and the rest.
+        fields.appendChecked(ctx.alloc, h.name, h.value) catch continue;
+    }
+    fields.immutable = true;
+    const idx: u32 = @intCast(ctx.http_fields.items.len);
+    try ctx.http_fields.append(ctx.alloc, fields);
+    return idx;
 }
 
 /// Guest value and host cap, whichever is smaller.
@@ -352,7 +377,7 @@ pub const Transfer = struct {
 };
 
 /// Connect, send, read the response head. The body is left unread.
-fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpRequestOptions, status_out: *u16) !*Transfer {
+fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpRequestOptions, status_out: *u16, headers_out: *?u32) !*Transfer {
     const io = ctx_mod.ctxIo(ctx) catch return error.NoHostIo;
     const alloc = ctx.alloc;
 
@@ -395,9 +420,10 @@ fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpReq
     // response head, including partial headers and interim 100 responses.
     const deadline = effectiveDeadline(opts.first_byte_timeout_ns, effectiveDeadline(opts.connect_timeout_ns, ctx.host.http_head_deadline_ns));
     try t.runWithDeadline(deadline, Transfer.receiveHead, .{ t, method, uri, extra.items });
-    // Read the status BEFORE the body stream is initialized: `reader()`
-    // invalidates the head's string pointers.
+    // Read the status and copy the headers BEFORE the body stream is
+    // initialized: `reader()` invalidates the head's string pointers.
     status_out.* = @intCast(@backingInt(t.response.head.status));
+    headers_out.* = try copyResponseHeaders(ctx, t.response.head);
     t.reader = t.response.reader(&t.transfer_buf);
     return t;
 }
@@ -598,12 +624,14 @@ fn checkPartialTimeout(reply: []const u8, scheme: p3http.Scheme, body: bool, gue
         .{};
     const started = std.Io.Timestamp.now(io, .awake);
     if (body) {
-        const t = try startTransfer(&ctx, &req, opts, &status);
+        var headers: ?u32 = null;
+        const t = try startTransfer(&ctx, &req, opts, &status, &headers);
         defer t.destroy(testing.allocator);
         try testing.expectEqual(@as(u16, 200), status);
         try testing.expectError(error.ResponseTimeout, t.runWithDeadline(300 * std.time.ns_per_ms, Transfer.readBody, .{t}));
     } else {
-        const result = startTransfer(&ctx, &req, opts, &status);
+        var headers: ?u32 = null;
+        const result = startTransfer(&ctx, &req, opts, &status, &headers);
         if (result) |t| t.destroy(testing.allocator) else |_| {}
         try testing.expectError(error.ResponseTimeout, result);
     }
@@ -652,7 +680,8 @@ test "wasi:http@0.2.x: host cancellation interrupts a partial response head" {
     };
     defer req.deinit(testing.allocator);
     var status: u16 = 0;
-    var pending = try io.concurrent(startTransfer, .{ &ctx, &req, p3http.HttpRequestOptions{}, &status });
+    var headers: ?u32 = null;
+    var pending = try io.concurrent(startTransfer, .{ &ctx, &req, p3http.HttpRequestOptions{}, &status, &headers });
     defer {
         if (pending.cancel(io)) |t| t.destroy(testing.allocator) else |_| {}
     }
@@ -961,4 +990,58 @@ pub fn p2HttpOutgoingRequestHeaders(caller: *Caller, self: u32) WasiP2Error!u32 
         return WasiP2Error.OutOfMemory;
     };
     return ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, idx);
+}
+
+/// `[method]incoming-response.headers` → `own<fields>`, immutable per the WIT.
+pub fn p2HttpIncomingResponseHeaders(caller: *Caller, self: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const h = try ctx.resources.peek(self);
+    if (h.rt != WasiP2Ctx.HTTP_P2_RESPONSE_RT) return resource_table.Error.TypeMismatch;
+    const ex = try exchangeOf(ctx, h.rep);
+    const rep = ex.headers_rep orelse return WasiP2Error.InvalidHandle;
+    return ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, rep);
+}
+
+/// `[static]incoming-body.finish(this)` → `own<future-trailers>`. Takes the
+/// body over; this host decides the trailers from the head it already read, so
+/// the future is ready immediately.
+pub fn p2HttpIncomingBodyFinish(caller: *Caller, self: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const h = try ctx.resources.peek(self);
+    if (h.rt != WasiP2Ctx.HTTP_P2_BODY_RT) return resource_table.Error.TypeMismatch;
+    const ex = try exchangeOf(ctx, h.rep);
+    ex.trailers_taken = true;
+    return ctx.resources.new(WasiP2Ctx.HTTP_P2_TRAILERS_RT, h.rep);
+}
+
+/// `[method]future-trailers.get` → `option<result<result<option<trailers>,
+/// error-code>>>`: the same triple nesting as `future-incoming-response.get`
+/// (offsets 0 / 8 / 16 / 24 / 28, straight from the generated bindings). This
+/// host surfaces no trailers, so the value is `some(ok(ok(none)))`, and the
+/// outer result turns `err` after the first retrieval.
+pub fn p2HttpFutureTrailersGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const h = try ctx.resources.peek(self);
+    if (h.rt != WasiP2Ctx.HTTP_P2_TRAILERS_RT) return resource_table.Error.TypeMismatch;
+    const ex = try exchangeOf(ctx, h.rep);
+    try mem.write(retptr, @as(u8, 1)); // some
+    if (ex.trailers_retrieved) {
+        try mem.write(retptr + 8, @as(u8, 1)); // outer err: already retrieved
+        return;
+    }
+    ex.trailers_retrieved = true;
+    try mem.write(retptr + 8, @as(u8, 0)); // outer ok
+    try mem.write(retptr + 16, @as(u8, 0)); // inner ok
+    try mem.write(retptr + 24, @as(u8, 0)); // option<trailers> = none
+}
+
+/// `[method]future-trailers.subscribe` → `own<pollable>`; ready at once, since
+/// the trailers are already decided.
+pub fn p2HttpFutureTrailersSubscribe(caller: *Caller, self: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const h = try ctx.resources.peek(self);
+    if (h.rt != WasiP2Ctx.HTTP_P2_TRAILERS_RT) return resource_table.Error.TypeMismatch;
+    _ = try exchangeOf(ctx, h.rep);
+    return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
 }

@@ -95,6 +95,12 @@ pub const HttpP2Exchange = struct {
     retrieved: bool = false,
     /// The guest's between-bytes timeout for lazy body reads (null = host cap).
     between_bytes_ns: ?u64 = null,
+    /// Index into `ctx.http_fields` of the response head's headers (immutable).
+    headers_rep: ?u32 = null,
+    /// `incoming-body.finish` mints the trailers future once.
+    trailers_taken: bool = false,
+    /// `future-trailers.get` retrieves the trailers at most once.
+    trailers_retrieved: bool = false,
 
     pub fn deinit(self: *HttpP2Exchange, alloc: std.mem.Allocator) void {
         if (self.transfer) |t| t.destroy(alloc);
@@ -323,6 +329,7 @@ pub const WasiP2Ctx = struct {
     pub const HTTP_P2_RESPONSE_RT: u32 = 22;
     pub const HTTP_P2_BODY_RT: u32 = 23;
     pub const HTTP_P2_BODY_STREAM_RT: u32 = 24;
+    pub const HTTP_P2_TRAILERS_RT: u32 = 25;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.
