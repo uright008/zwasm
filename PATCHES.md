@@ -21,6 +21,7 @@
 | p3e | `safety: two reachable aborts become typed errors` | `invokeFlat` 的 arity assert → `error.ArgArityMismatch`；`Table.set` 的 JIT funcref `@panic` → `error.UnsupportedFuncrefMirror` | 可上游（通用） | 上游若修，删除 |
 | p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | `STACK_GUARD_HEADROOM` 全平台统一 1 MiB；两个后端对超出 headroom 的帧 decline（解释器接管） | **#495 仍 open** | 上游若采用别的修法（信号分类/逐页探测），按新形状重写 |
 | p4a | `feat(http): stream the response body from the live connection` | `handle` 只做 connect/send/head；body 由 guest 的 `read` 按需从活连接拉，固定 16 KiB transfer 缓冲，**去掉 8 MiB eager 上限**；transfer 单块堆分配（std 的指针自引用） | 上游 p2 http 尚缺 | 可上游化 |
+| p6f | `feat(cli): say which import a component was refused for` | `zwasm run` 在 `UnsupportedWasiImport` 时追加诊断（接口#函数 + 代）；实测服务端面 `wasi:http/types#[method]incoming-request.consume` 被明确报出 | 通用改进 | 可上游化 |
 | p6e | `feat(http): transport failures carry their real error-code` | `handle` 的传输失败不再一律 `internal-error`：`errorCodeFor` 映射到规范错误码（connection-timeout / connection-refused / connection-terminated / destination-unavailable / DNS-error / TLS-protocol-error / TLS-certificate-error / HTTP-protocol-error，catch-all 仍 internal-error）；序号取 0.2.12 声明序。**遗留**：body 读失败仍以调用失败结束，未走 `stream-error::last-operation-failed`（需要 error 资源） | 上游 p2 http 尚缺 | 可上游化 |
 | p6d | `feat(http): would-block for non-blocking read, and an honest body pollable` | 非阻塞 `read` 在无数据时返回**空列表**（WASI would-block），`blocking-read` 仍等首字节；body 流的 pollable **真实就绪**（缓冲有字节 / socket 可读（零超时 poll）/ 传输已结束），新 `HTTP_P2_BODY_POLLABLE_RT` 携带 exchange 索引 | 上游 p2 http 尚缺 | 可上游化；「空列表指针须非空悬垂（对齐值 4）」是 canonical ABI 细节，值得上游注意 |
 | p6c | `feat(http): request bodies - outgoing-body, write, finish, and POST` | `outgoing-request.body()` → outgoing-body（WIT 只允许一次）；`outgoing-body.write()` → output-stream（一次），写入落进所属请求的缓冲，`check-write`/`flush` 接受该流；缓冲宿主上限 8 MiB；`finish` 定稿（请求 trailers 接受但不承载，已记录），流未 drop 则判为调用失败；`handle` 用 `sendBodyComplete` 发送真实 Content-Length | 上游 p2 http 尚缺 | 可上游化 |
@@ -85,6 +86,7 @@ zig build && zig build test                                  # 见下
 - **请求体/POST**：probe 的 `post-report` 经 output-stream 写体、验证 `write()` 只允许一次、`finish` 后发送；回显服务器返回的 body 与写入完全一致。
 - **would-block / 就绪**：probe 的 `nonblocking-report` 对「先发头、body 延后 300ms」的服务器：pollable 报未就绪 → 非阻塞 `read` 返回空 → `block()` 在 body 到达时唤醒 → 读到 `slow-body!`。
 - **error-code 保真**：probe 的 `refused-report` 对「已绑定后关闭的端口」→ guest 看到 `ErrorCode::ConnectionRefused`（而非泛化失败）。
+- **服务端面诊断**：`zwasm run` 对导入 `[method]incoming-request.consume` 的组件输出 `UnsupportedWasiImport (unclassified component import 'wasi:http/types#[method]incoming-request.consume' (p2))`。
 - 核心套件 **3286 passed / 12 skipped / 0 failed**。
 - 注：定义表（`host_imports`）已可注入；`Linker` 对象本身仍由内部创建——注册表已覆盖「自定义 import + 默认拒绝」的需求，暂不需要暴露 Linker 对象。
 
