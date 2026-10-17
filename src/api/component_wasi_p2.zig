@@ -1603,6 +1603,10 @@ const Def = union(enum) {
     host_op_async: adapter.P2Op,
     /// A `canon context.{get,set}` builtin over `WasiP2Ctx.task_context`.
     context_builtin: struct { is_set: bool, slot: ctypes.ContextSlot },
+    /// An embedder-registered component import (snooze fork): the interface is
+    /// not a WASI row, so it binds through `Linker.defineFuncRaw` with the
+    /// signature the embedder declared.
+    host_import: *const wasi_host.Host.HostImport,
     /// `canon task.cancel` / `subtask.{cancel,drop}` / `thread.yield` (ADR-0205
     /// phase A): linkable; unimplemented ones fail loudly at CALL time.
     async_support_builtin: AsyncSupportOp,
@@ -1644,11 +1648,18 @@ const Built = union(enum) { guest: *Instance, synthetic: []const SynthExport };
 /// Resolve one `core:inlineexport` to the `Def` an importer should bind, or
 /// null when it is not a host-relevant export (skipped). `built` holds the
 /// already-constructed earlier instances (aliases only reference those).
-fn synthDef(arena: Allocator, info: *const ctypes.TypeInfo, built: []const ?Built, ex: ctypes.CoreInlineExport) !?Def {
+fn synthDef(arena: Allocator, info: *const ctypes.TypeInfo, built: []const ?Built, ex: ctypes.CoreInlineExport, host: *wasi_host.Host) !?Def {
     switch (ex.sort) {
         .func => switch (info.coreFunc(ex.index) orelse return null) {
             .lower => |l| {
                 const ref = info.resolveComponentImport(l.func) orelse return null;
+                // Admission first: the embedder's catalog decides what may be
+                // bound at all. Nothing is granted implicitly by the WASI table.
+                if (!host.admit(ref.interface, ref.func)) return error.ImportDenied;
+                // An embedder-registered interface (snooze:host/*, …) binds raw.
+                if (host.findHostImport(ref.interface, ref.func)) |imp| {
+                    return .{ .host_import = imp };
+                }
                 const op = adapter.classifyImport(ref.interface, ref.func, ref.gen) orelse return error.UnsupportedWasiImport;
                 if (l.opts.is_async) return .{ .host_op_async = op };
                 return .{ .host_op = op };
@@ -1739,6 +1750,7 @@ fn synthDef(arena: Allocator, info: *const ctypes.TypeInfo, built: []const ?Buil
 fn defineSynth(lk: *Linker, ns: []const u8, e: SynthExport, ctx: *WasiP2Ctx) !void {
     switch (e.def) {
         .host_op => |op| try defineClassifiedFunc(lk, ns, e.name, op, ctx),
+        .host_import => |imp| try lk.defineFuncRaw(ns, e.name, imp.data, imp.params, imp.results, imp.handler),
         .resource_builtin => |rb| {
             const rbc = try ctx.alloc.create(ResourceBuiltinCtx);
             errdefer ctx.alloc.destroy(rbc);
@@ -1971,7 +1983,7 @@ pub fn buildWasiP2Component(engine: *Engine, alloc: Allocator, bytes: []const u8
                 const list = try self.synth_arena.allocator().alloc(SynthExport, exps.len);
                 var n: usize = 0;
                 for (exps) |ex| {
-                    const def = (try synthDef(self.synth_arena.allocator(), &self.info, self.built, ex)) orelse continue;
+                    const def = (try synthDef(self.synth_arena.allocator(), &self.info, self.built, ex, ctx.host)) orelse continue;
                     list[n] = .{ .name = ex.name, .def = def };
                     n += 1;
                 }

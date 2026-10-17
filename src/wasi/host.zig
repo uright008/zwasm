@@ -17,6 +17,8 @@
 //! (`interp/`, `jit*/`) or Zone 3 (`c_api/`, `cli/`).
 
 const std = @import("std");
+const zir = @import("../ir/zir.zig");
+const marshal = @import("../zwasm/host_func_marshal.zig");
 
 const p1 = @import("preview1.zig");
 
@@ -190,6 +192,51 @@ pub const Host = struct {
     /// for its deadline. Atomic because the two sides are different threads.
     http_cancel_fn: ?*const fn (*anyopaque) void = null,
     http_cancel_target: std.atomic.Value(?*anyopaque) = std.atomic.Value(?*anyopaque).init(null),
+
+    /// Component imports the embedder registers itself (snooze fork). An
+    /// interface that is neither a WASI row nor listed here is refused at link
+    /// time — that refusal is the default deny.
+    ///
+    /// The signature is the flattened core shape the component's import must
+    /// match (`params`/`results` in core value types); the handler receives the
+    /// raw operand values and its own `data` through `caller.host_data`.
+    host_imports: []const HostImport = &.{},
+
+    /// Admission callback, consulted for EVERY component import before it is
+    /// bound. When set and it returns false, instantiation is refused with
+    /// `ImportDenied`: the embedder's capability catalog is then the only
+    /// source of truth, so registering a WASI helper does not silently grant
+    /// the interfaces it contains.
+    admission_fn: ?AdmissionFn = null,
+    admission_data: ?*anyopaque = null,
+
+    pub const HostImport = struct {
+        /// Interface name as it appears in the component (version stripped),
+        /// e.g. "snooze:host/probe".
+        iface: []const u8,
+        func: []const u8,
+        params: []const zir.ValType,
+        results: []const zir.ValType,
+        handler: marshal.RawHostFn,
+        /// Reaches the handler as `caller.host_data`.
+        data: ?*anyopaque = null,
+    };
+
+    pub const AdmissionFn = *const fn (data: ?*anyopaque, iface: []const u8, func: []const u8) bool;
+
+    /// The registered import for `(iface, func)`, if any.
+    pub fn findHostImport(self: *const Host, iface: []const u8, func: []const u8) ?*const HostImport {
+        for (self.host_imports) |*imp| {
+            if (std.mem.eql(u8, imp.iface, iface) and std.mem.eql(u8, imp.func, func)) return imp;
+        }
+        return null;
+    }
+
+    /// Ask the admission callback (default-allow when none is set).
+    pub fn admit(self: *const Host, iface: []const u8, func: []const u8) bool {
+        const f = self.admission_fn orelse return true;
+        return f(self.admission_data, iface, func);
+    }
 
     /// Cancel the live p2 http transfer, if any. Safe to call from any thread;
     /// a no-op when nothing is in flight.

@@ -25,6 +25,7 @@ const Module = @import("../zwasm/module.zig").Module;
 const Instance = @import("../zwasm/instance.zig").Instance;
 const Value = @import("../zwasm.zig").Value;
 const Caller = @import("../zwasm/caller.zig").Caller;
+const rt_value = @import("../runtime/value.zig");
 
 // component.zig public decls the tests reference by bare name.
 const instantiate = component.instantiate;
@@ -2421,4 +2422,62 @@ test "wasi:http@0.2.x: a host-side cancel unblocks a stalled body read" {
     try testing.expect(outcome.finished.load(.acquire));
     try testing.expect(outcome.trapped); // the guest sees the read fail
     try testing.expect(elapsed_ms < 2000); // unblocked by the cancel, not the deadline
+}
+
+/// Raw handler for the embedder-registered import: answers with the value its
+/// `data` points at, which is how an embedder reaches its own state from a raw
+/// host import (`caller.host_data`).
+fn probeAnswerHandler(caller: *Caller, args: []const rt_value.Value, results: []rt_value.Value) anyerror!void {
+    _ = args;
+    const answer: *const u32 = @ptrCast(@alignCast(caller.host_data.?));
+    results[0] = .{ .i32 = @bitCast(answer.*) };
+}
+
+/// Admission hook that refuses everything: the embedder's catalog is the only
+/// source of truth, so even a registered import needs to pass it.
+fn denyEveryImport(data: ?*anyopaque, iface: []const u8, func: []const u8) bool {
+    _ = data;
+    _ = iface;
+    _ = func;
+    return false;
+}
+
+test "host seam: embedder-registered imports bind, and admission can refuse them" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/host_import_probe.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    // Default deny: `snooze:host/probe` is not a WASI row and nothing is
+    // registered, so the component is refused at link time.
+    try testing.expectError(error.UnsupportedWasiImport, component.open(&eng, testing.allocator, bytes, &host, .{}));
+
+    // Registered: the guest calls the host import and re-exports its answer.
+    var answer: u32 = 4242;
+    const imports = [_]wasi_host.Host.HostImport{.{
+        .iface = "snooze:host/probe",
+        .func = "answer",
+        .params = &.{},
+        .results = &.{.i32},
+        .handler = probeAnswerHandler,
+        .data = @ptrCast(&answer),
+    }};
+    host.host_imports = &imports;
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+    const out = (try opened.invokeTyped("run", &.{}, testing.allocator)).?;
+    defer out.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 4242), out.u32);
+
+    // Admission still decides: a registered import is refused when the
+    // catalog says no.
+    host.admission_fn = denyEveryImport;
+    try testing.expectError(error.ImportDenied, component.open(&eng, testing.allocator, bytes, &host, .{}));
 }
