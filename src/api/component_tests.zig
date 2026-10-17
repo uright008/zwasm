@@ -2619,3 +2619,78 @@ test "wasi:http@0.2.x: response headers and the trailers future" {
     for (fails) |f| std.debug.print("[headers-probe] {s}\n", .{f.string});
     try testing.expectEqual(@as(usize, 0), fails.len);
 }
+
+/// Reads a full request (head + Content-Length body) and echoes the body back,
+/// so a POST round trip can be checked end to end.
+fn postEchoServer(io: std.Io, server: *std.Io.net.Server) void {
+    var conn = server.accept(io) catch return;
+    defer conn.close(io);
+    var buf: [8192]u8 = undefined;
+    var n: usize = 0;
+    var head_end: usize = 0;
+    while (n < buf.len) {
+        var bufs = [_][]u8{buf[n..]};
+        const got = conn.read(io, &bufs) catch return;
+        if (got == 0) return;
+        n += got;
+        if (std.mem.find(u8, buf[0..n], "\r\n\r\n")) |i| {
+            head_end = i + 4;
+            break;
+        }
+    }
+    if (head_end == 0) return;
+    // Content-Length decides how much body to wait for.
+    var want: usize = 0;
+    var it = std.mem.splitSequence(u8, buf[0..head_end], "\r\n");
+    while (it.next()) |line| {
+        if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
+            want = std.fmt.parseInt(usize, std.mem.trim(u8, line["content-length:".len..], " "), 10) catch 0;
+        }
+    }
+    while (n - head_end < want) {
+        var bufs = [_][]u8{buf[n..]};
+        const got = conn.read(io, &bufs) catch return;
+        if (got == 0) return;
+        n += got;
+    }
+    const body = buf[head_end..n];
+    var out: [9000]u8 = undefined;
+    const resp = std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
+    var wbuf: [512]u8 = undefined;
+    var w = conn.writer(io, &wbuf);
+    w.interface.writeAll(resp) catch return;
+    w.interface.flush() catch return;
+}
+
+test "wasi:http@0.2.x: a POST request body round-trips" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_fields_probe.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+    var server_fut = try io.concurrent(postEchoServer, .{ io, &server });
+    defer _ = server_fut.cancel(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/echo", .{port});
+    defer testing.allocator.free(url);
+
+    const out = (try opened.invokeTyped("snooze:http-probe/api@0.1.0#post-report", &.{ .{ .string = url }, .{ .string = "body-through-the-fork" } }, testing.allocator)).?;
+    defer out.deinit(testing.allocator);
+    const fails = out.list;
+    for (fails) |f| std.debug.print("[post-probe] {s}\n", .{f.string});
+    try testing.expectEqual(@as(usize, 0), fails.len);
+}

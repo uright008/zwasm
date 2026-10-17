@@ -88,10 +88,21 @@ pub fn p2HttpOutgoingRequestNew(caller: *Caller, headers: u32) WasiP2Error!u32 {
 }
 
 fn outgoingRequestOf(ctx: *WasiP2Ctx, handle: u32) WasiP2Error!*p3http.HttpRequest {
+    return &ctx.http_p2_requests.items[try outgoingRequestRep(ctx, handle)];
+}
+
+/// The request's index in `ctx.http_p2_requests` — what the child handles
+/// (outgoing-body, its output-stream) carry as their rep.
+fn outgoingRequestRep(ctx: *WasiP2Ctx, handle: u32) WasiP2Error!u32 {
     const h = try ctx.resources.peek(handle);
     if (h.rt != WasiP2Ctx.HTTP_P2_OUTGOING_REQUEST_RT) return resource_table.Error.TypeMismatch;
     if (h.rep >= ctx.http_p2_requests.items.len) return resource_table.Error.InvalidHandle;
-    return &ctx.http_p2_requests.items[h.rep];
+    return h.rep;
+}
+
+fn requestByRep(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpRequest {
+    if (rep >= ctx.http_p2_requests.items.len) return resource_table.Error.InvalidHandle;
+    return &ctx.http_p2_requests.items[rep];
 }
 
 /// `[method]outgoing-request.set-scheme(option<scheme>) -> result`.
@@ -361,13 +372,23 @@ pub const Transfer = struct {
         }
     }
 
-    fn receiveHead(self: *Transfer, method: std.http.Method, uri: std.Uri, headers: []const std.http.Header) anyerror!void {
+    /// Connect, send the head (and the body when the method carries one), then
+    /// read the response head. `body` is the guest's `outgoing-body` buffer,
+    /// which is empty for the bodiless methods.
+    fn sendAndReceiveHead(self: *Transfer, method: std.http.Method, uri: std.Uri, headers: []const std.http.Header, body: []u8) anyerror!void {
         self.request = try self.client.request(method, uri, .{
             .extra_headers = headers,
             .redirect_behavior = .unhandled,
         });
         self.request_initialized = true;
-        try self.request.sendBodiless();
+        // `sendBodyComplete` asserts the method carries a body, so a bodiless
+        // method (GET/HEAD/DELETE...) keeps the empty-body path even when the
+        // guest wrote bytes into the body buffer.
+        if (method.requestHasBody()) {
+            try self.request.sendBodyComplete(body);
+        } else {
+            try self.request.sendBodiless();
+        }
         self.response = try self.request.receiveHead(&self.head_buf);
     }
 
@@ -419,7 +440,10 @@ fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpReq
     // A single deadline covers DNS, connect, TLS, sending and the complete
     // response head, including partial headers and interim 100 responses.
     const deadline = effectiveDeadline(opts.first_byte_timeout_ns, effectiveDeadline(opts.connect_timeout_ns, ctx.host.http_head_deadline_ns));
-    try t.runWithDeadline(deadline, Transfer.receiveHead, .{ t, method, uri, extra.items });
+    // The guest's `outgoing-body` buffer (empty unless it wrote one and called
+    // finish). It is owned by the request, which outlives the transfer.
+    const body: []u8 = if (req.p2_body_finished) req.p2_body.items else &.{};
+    try t.runWithDeadline(deadline, Transfer.sendAndReceiveHead, .{ t, method, uri, extra.items, body });
     // Read the status and copy the headers BEFORE the body stream is
     // initialized: `reader()` invalidates the head's string pointers.
     status_out.* = @intCast(@backingInt(t.response.head.status));
@@ -1044,4 +1068,88 @@ pub fn p2HttpFutureTrailersSubscribe(caller: *Caller, self: u32) WasiP2Error!u32
     if (h.rt != WasiP2Ctx.HTTP_P2_TRAILERS_RT) return resource_table.Error.TypeMismatch;
     _ = try exchangeOf(ctx, h.rep);
     return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
+}
+
+// ---- wasi:http@0.2.x outgoing-body (request bodies) ----
+
+/// The guest writes a request body through an output-stream whose writes land
+/// in the owning request's buffer. The buffer is host-bounded: a body larger
+/// than this fails the write (the guest sees `stream-error::closed`), which is
+/// the documented limit of this slice.
+pub const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+fn bodyRequestOf(ctx: *WasiP2Ctx, handle: u32) WasiP2Error!*p3http.HttpRequest {
+    const h = try ctx.resources.peek(handle);
+    if (h.rt != WasiP2Ctx.HTTP_P2_OUTGOING_BODY_RT) return resource_table.Error.TypeMismatch;
+    return requestByRep(ctx, h.rep);
+}
+
+/// `[method]outgoing-request.body` → `result<own<outgoing-body>>` (retptr:
+/// disc @0, handle @4, per the generated bindings).
+pub fn p2HttpOutgoingRequestBody(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const rep = try outgoingRequestRep(ctx, self);
+    const handle = try ctx.resources.new(WasiP2Ctx.HTTP_P2_OUTGOING_BODY_RT, rep);
+    try mem.write(retptr, @as(u8, 0)); // ok
+    try mem.write(retptr + 4, handle);
+}
+
+/// `[method]outgoing-body.write` → `result<own<output-stream>>`; at most once.
+pub fn p2HttpOutgoingBodyWrite(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const h = try ctx.resources.peek(self);
+    if (h.rt != WasiP2Ctx.HTTP_P2_OUTGOING_BODY_RT) return resource_table.Error.TypeMismatch;
+    const req = try requestByRep(ctx, h.rep);
+    if (req.p2_body_stream_taken or req.p2_body_finished) {
+        try mem.write(retptr, @as(u8, 1)); // err: the stream was already taken
+        return;
+    }
+    req.p2_body_stream_taken = true;
+    const handle = try ctx.resources.new(WasiP2Ctx.HTTP_P2_BODY_OUT_STREAM_RT, h.rep);
+    try mem.write(retptr, @as(u8, 0)); // ok
+    try mem.write(retptr + 4, handle);
+}
+
+/// Append to the owning request's body buffer (the `output-stream.write` /
+/// `blocking-write-and-flush` path for a body stream). Returns the accepted
+/// length through `retptr` exactly like the fd-backed streams.
+pub fn bodyOutStreamWrite(ctx: *WasiP2Ctx, mem: Memory, rep: u32, bytes: []const u8, retptr: u32) WasiP2Error!void {
+    const req = try requestByRep(ctx, rep);
+    if (req.p2_body.items.len + bytes.len > MAX_REQUEST_BODY_BYTES) {
+        try mem.write(retptr, @as(u8, 1)); // err: stream-error::closed
+        try mem.write(retptr + 4, @as(u8, 1));
+        return;
+    }
+    req.p2_body.appendSlice(ctx.alloc, bytes) catch return WasiP2Error.OutOfMemory;
+    try mem.write(retptr, @as(u8, 0)); // ok
+    try mem.write(retptr + 4, @as(u32, @intCast(bytes.len)));
+}
+
+/// Dropping the body's output-stream is what lets `finish` proceed.
+pub fn dropBodyOutStream(ctx: *WasiP2Ctx, rep: u32) void {
+    if (rep >= ctx.http_p2_requests.items.len) return;
+    ctx.http_p2_requests.items[rep].p2_body_stream_taken = false;
+}
+
+/// `[static]outgoing-body.finish(this, option<trailers>)` →
+/// `result<_, error-code>` (retptr: disc @0, error-code disc @8 because
+/// error-code aligns to 8).
+pub fn p2HttpOutgoingBodyFinish(caller: *Caller, self: u32, trailers_disc: u32, trailers_handle: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    _ = trailers_handle;
+    const req = try bodyRequestOf(ctx, self);
+    if (req.p2_body_stream_taken) {
+        // The WIT says a live output-stream child traps. Report it as a failed
+        // call rather than silently finalising a body the guest may still write.
+        return WasiP2Error.ReadFailed;
+    }
+    if (trailers_disc == 1) {
+        // Request trailers are not carried by this host (documented); the body
+        // itself still finalises.
+    }
+    req.p2_body_finished = true;
+    try mem.write(retptr, @as(u8, 0)); // ok
 }

@@ -301,6 +301,15 @@ pub const HttpRequest = struct {
     path_with_query: ?[]u8 = null,
     scheme: ?Scheme = null,
     authority: ?[]u8 = null,
+    /// The 0.2 `outgoing-body` buffer (snooze fork): the guest writes the
+    /// request body into this through the body's output-stream, and `handle`
+    /// sends it. Bounded by the host (see the p2 http module).
+    p2_body: std.ArrayList(u8) = .empty,
+    /// `outgoing-body.write` hands the stream out at most once; dropping the
+    /// stream clears this so `finish` can tell a live child from a dropped one.
+    p2_body_stream_taken: bool = false,
+    /// `outgoing-body.finish` was called.
+    p2_body_finished: bool = false,
     /// Owned children (reps into the ctx tables; immutable once attached).
     headers_rep: u32,
     options_rep: ?u32 = null,
@@ -308,6 +317,11 @@ pub const HttpRequest = struct {
     trailers_future: u32 = 0,
 
     pub fn deinit(self: *HttpRequest, alloc: std.mem.Allocator) void {
+        // `ArrayList.deinit` leaves the list `undefined`, and a request is
+        // deinit'd twice in normal use (the drop path, then the ctx teardown),
+        // so reset it here like the other fields below.
+        self.p2_body.deinit(alloc);
+        self.p2_body = .empty;
         self.method.deinit(alloc);
         if (self.path_with_query) |s| alloc.free(s);
         if (self.scheme) |*sc| sc.deinit(alloc);
