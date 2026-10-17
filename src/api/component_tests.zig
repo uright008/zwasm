@@ -2541,3 +2541,28 @@ test "unload barrier: beginClose refuses new calls, cancel unblocks, drain reach
     opened.deinit();
     try testing.expect(host.http_cancel_target.load(.acquire) == null);
 }
+
+test "wasi:http@0.2.x: the 0.2 fields/options/request surface works" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_fields_probe.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try component.open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    // The guest runs every check itself and returns one message per failure.
+    const out = (try opened.invokeTyped("snooze:http-probe/api@0.1.0#run", &.{}, testing.allocator)).?;
+    defer out.deinit(testing.allocator);
+    // `run` returns the failure list directly (no result wrapper).
+    const fails = out.list;
+    for (fails) |f| std.debug.print("[fields-probe] {s}\n", .{f.string});
+    try testing.expectEqual(@as(usize, 0), fails.len);
+}

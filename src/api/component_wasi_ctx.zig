@@ -210,8 +210,8 @@ pub const WasiP2Ctx = struct {
     /// p2 `wasi:http` `outgoing-request` resources (rep = index).
     http_p2_requests: std.ArrayList(p3http.HttpRequest) = .empty,
     /// p2 exchanges (rep = index), shared by the future / response / body /
-    /// body-stream handles. The transport buffers the body eagerly in this
-    /// slice, so the socket is already closed by the time the guest reads.
+    /// body-stream handles. Each transfer retains its connection until EOF,
+    /// reader drop or context destruction.
     http_p2_exchanges: std.ArrayList(HttpP2Exchange) = .empty,
     http_requests: std.ArrayList(p3http.HttpRequest) = .empty,
     http_responses: std.ArrayList(p3http.HttpResponse) = .empty,
@@ -381,8 +381,7 @@ pub const WasiP2Ctx = struct {
         self.http_fields.deinit(self.alloc);
         for (self.http_p2_requests.items) |*r| r.deinit(self.alloc);
         self.http_p2_requests.deinit(self.alloc);
-        // Nothing can be cancelled once the ctx is gone.
-        self.host.http_cancel_target.store(null, .release);
+        // Each transfer unregisters and waits for any canceller before freeing.
         for (self.http_p2_exchanges.items) |*e| e.deinit(self.alloc);
         self.http_p2_exchanges.deinit(self.alloc);
         for (self.http_requests.items) |*r| r.deinit(self.alloc);

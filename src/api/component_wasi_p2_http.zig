@@ -10,7 +10,7 @@
 //! through a fixed 16 KiB transfer buffer, so a response of any size streams
 //! without a host-side copy of it. Not in this slice (next): request bodies
 //! (`outgoing-body`), trailers, response headers, real readiness for the
-//! non-blocking `read`, timeouts and cancellation, and the server-side
+//! non-blocking `read`, and the server-side
 //! resources.
 //!
 //! Encoding note: p2 handles are 32-bit, so a variant payload starts at +4
@@ -21,9 +21,10 @@
 const std = @import("std");
 
 const ctx_mod = @import("component_wasi_ctx.zig");
+const p3h = @import("component_wasi_p3_host.zig");
 const p3http = @import("../wasi/p3_http.zig");
 const resource_table = @import("../feature/component/resource_table.zig");
-const builtin = @import("builtin");
+const Host = @import("../wasi/host.zig").Host;
 const Caller = @import("../zwasm/caller.zig").Caller;
 
 const Allocator = std.mem.Allocator;
@@ -223,28 +224,10 @@ pub fn p2HttpOutgoingHandlerHandle(caller: *Caller, request: u32, opt_disc: u32,
     };
     ex.status = status;
     ex.between_bytes_ns = opts.between_bytes_timeout_ns;
-    registerCancel(ctx, ex.transfer.?);
 
     const handle = ctx.resources.new(WasiP2Ctx.HTTP_P2_FUTURE_RT, idx) catch return WasiP2Error.OutOfMemory;
     try mem.write(retptr, @as(u8, 0)); // ok
     try mem.write(retptr + 8, handle); // error-code's option<u64> case aligns the payload to 8
-}
-
-/// Wait until `handle` is readable, or `timeout_ns` expires. Same readiness
-/// idiom as `p2_sockets.pollOnce`, with a deadline instead of a zero timeout.
-/// Windows uses the AFD path there; here it falls back to no deadline.
-fn waitReadable(handle: std.Io.net.Socket.Handle, timeout_ns: u64) WasiP2Error!bool {
-    if (builtin.os.tag == .windows) return true;
-    const ms: i32 = @intCast(@min(timeout_ns / std.time.ns_per_ms, @as(u64, std.math.maxInt(i32))));
-    var fds = [_]std.posix.pollfd{.{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 }};
-    const n = std.posix.poll(&fds, ms) catch return WasiP2Error.ReadFailed;
-    return n > 0 and (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0;
-}
-
-/// The socket behind a live transfer, for readiness waits.
-fn connectionHandle(t: *Transfer) ?std.Io.net.Socket.Handle {
-    const conn = t.request.connection orelse return null;
-    return conn.stream_reader.stream.socket.handle;
 }
 
 /// Trampoline for `Host.http_cancel_fn` (it takes `*anyopaque`).
@@ -253,17 +236,8 @@ fn cancelTransfer(target: *anyopaque) void {
     t.cancel();
 }
 
-/// Publish the live transfer for host-side cancellation.
-fn registerCancel(ctx: *WasiP2Ctx, t: *Transfer) void {
-    ctx.host.http_cancel_fn = cancelTransfer;
-    ctx.host.http_cancel_target.store(t, .release);
-}
-
-/// Drop the transfer (and its connection) and clear the cancel target.
+/// Drop the transfer. Transfer.destroy unregisters it before freeing anything.
 fn destroyExchange(ctx: *WasiP2Ctx, ex: *Exchange) void {
-    if (ex.transfer) |t| {
-        _ = ctx.host.http_cancel_target.cmpxchgStrong(t, null, .release, .acquire);
-    }
     ex.deinit(ctx.alloc);
 }
 
@@ -287,24 +261,93 @@ pub const Transfer = struct {
     reader: *std.Io.Reader,
     head_buf: [8192]u8 = undefined,
     transfer_buf: [16 * 1024]u8 = undefined,
-    /// Set by `cancel` before the socket is shut down, so a read that the
-    /// cancel unblocks fails the call instead of looking like a normal EOF.
-    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    host: *Host,
+    request_initialized: bool = false,
+    /// Persistent cancellation, including cancellation between two guest reads.
+    cancelled: std.Io.Event = .unset,
+
+    fn create(alloc: Allocator, io: std.Io, host: *Host) Allocator.Error!*Transfer {
+        const self = try alloc.create(Transfer);
+        // Allocator.create does not apply field defaults. Initialize the whole
+        // value before publishing it to another thread.
+        self.* = .{
+            .client = .{ .allocator = alloc, .io = io },
+            .request = undefined,
+            .response = undefined,
+            .reader = undefined,
+            .host = host,
+        };
+        host.registerHttpCancel(io, self, cancelTransfer);
+        return self;
+    }
 
     pub fn destroy(self: *Transfer, alloc: Allocator) void {
-        // LIFO of the eager path: request (closes the connection) then client.
-        self.request.deinit();
+        self.host.unregisterHttpCancel(self.client.io, self);
+        // Network tasks are joined by runWithDeadline before ownership returns.
+        if (self.request_initialized) self.request.deinit();
         self.client.deinit();
         alloc.destroy(self);
     }
 
-    /// Cancel from another thread: shut the socket down so a body read blocked
-    /// in the kernel returns. Idempotent; the transfer itself is still owned by
-    /// the guest-facing handles and is freed by `destroyExchange`.
+    /// Only signal the task: request/connection fields belong to its IO worker
+    /// and may still be uninitialized (DNS, connect or TLS handshake).
     pub fn cancel(self: *Transfer) void {
-        self.cancelled.store(true, .release);
-        const conn = self.request.connection orelse return;
-        conn.stream_reader.stream.shutdown(self.client.io, .both) catch {};
+        self.cancelled.set(self.client.io);
+    }
+
+    fn waitCancelOrDeadline(self: *Transfer, deadline: std.Io.Timeout) anyerror!void {
+        while (true) {
+            self.cancelled.waitTimeout(self.client.io, deadline) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.Timeout => {
+                    // Event.waitTimeout also permits spurious wakeups.
+                    if (deadline.deadline.untilNow(self.client.io).raw.nanoseconds >= 0)
+                        return error.ResponseTimeout;
+                    continue;
+                },
+            };
+            return error.Canceled;
+        }
+    }
+
+    /// Race the entire operation against a deadline and host cancellation.
+    /// Joining both tasks before returning keeps all borrowed buffers alive and
+    /// prevents a timeout from leaving background IO touching a freed transfer.
+    fn runWithDeadline(self: *Transfer, timeout_ns: u64, comptime operation: anytype, args: std.meta.ArgsTuple(@TypeOf(operation))) !void {
+        if (self.cancelled.isSet()) return error.Canceled;
+        const io = self.client.io;
+        const deadline = (std.Io.Timeout{ .duration = .{
+            .raw = .fromNanoseconds(timeout_ns),
+            .clock = .awake,
+        } }).toDeadline(io);
+        const Result = union(enum) { operation: anyerror!void, interrupted: anyerror!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(io, &buffer);
+        defer select.cancelDiscard();
+        // Both must be concurrent: an inline async operation could block before
+        // we get to await/cancel the other task.
+        try select.concurrent(.interrupted, waitCancelOrDeadline, .{ self, deadline });
+        try select.concurrent(.operation, operation, args);
+        const result = try select.await();
+        if (self.cancelled.isSet()) return error.Canceled;
+        switch (result) {
+            .operation => |r| try r,
+            .interrupted => |r| try r,
+        }
+    }
+
+    fn receiveHead(self: *Transfer, method: std.http.Method, uri: std.Uri, headers: []const std.http.Header) anyerror!void {
+        self.request = try self.client.request(method, uri, .{
+            .extra_headers = headers,
+            .redirect_behavior = .unhandled,
+        });
+        self.request_initialized = true;
+        try self.request.sendBodiless();
+        self.response = try self.request.receiveHead(&self.head_buf);
+    }
+
+    fn readBody(self: *Transfer) anyerror!void {
+        _ = try self.reader.peekGreedy(1);
     }
 };
 
@@ -345,33 +388,16 @@ fn startTransfer(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, opts: p3http.HttpReq
         }
     }
 
-    const t = try alloc.create(Transfer);
-    errdefer alloc.destroy(t);
-    t.client = .{ .allocator = alloc, .io = io };
-    errdefer t.client.deinit();
-
+    const t = try Transfer.create(alloc, io, ctx.host);
+    errdefer t.destroy(alloc);
     const uri = try std.Uri.parse(url);
-    t.request = try t.client.request(method, uri, .{
-        .extra_headers = extra.items,
-        // `wasi:http` hands redirects to the guest; following them silently
-        // would hide the 3xx the guest asked to see.
-        .redirect_behavior = .unhandled,
-    });
-    errdefer t.request.deinit();
-    try t.request.sendBodiless();
-
-    // Bound the wait for the response head: the guest's connect timeout and the
-    // host cap, whichever is smaller. The connect inside `client.request` is
-    // owned by std and stays bounded by the OS; this covers "slow TLS, no
-    // headers" - the case a guest cannot outwait with a huge timeout.
-    if (connectionHandle(t)) |h| {
-        const deadline = effectiveDeadline(opts.connect_timeout_ns, ctx.host.http_head_deadline_ns);
-        if (!(try waitReadable(h, deadline))) return error.ResponseTimeout;
-    }
-    t.response = try t.request.receiveHead(&t.head_buf);
+    // A single deadline covers DNS, connect, TLS, sending and the complete
+    // response head, including partial headers and interim 100 responses.
+    const deadline = effectiveDeadline(opts.first_byte_timeout_ns, effectiveDeadline(opts.connect_timeout_ns, ctx.host.http_head_deadline_ns));
+    try t.runWithDeadline(deadline, Transfer.receiveHead, .{ t, method, uri, extra.items });
     // Read the status BEFORE the body stream is initialized: `reader()`
     // invalidates the head's string pointers.
-    status_out.* = @intCast(@intFromEnum(t.response.head.status));
+    status_out.* = @intCast(@backingInt(t.response.head.status));
     t.reader = t.response.reader(&t.transfer_buf);
     return t;
 }
@@ -464,31 +490,20 @@ pub fn bodyStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: 
     const want: usize = @intCast(@min(len, std.math.maxInt(u32)));
     const t = ex.transfer orelse return writeStreamClosed(mem, retptr);
     if (want == 0) return writeStreamClosed(mem, retptr);
-    // A cancelled transfer must not read as a clean end of body.
-    if (t.cancelled.load(.acquire)) return WasiP2Error.ReadFailed;
-
-    // Only poll when nothing is buffered anywhere in the chain: `receiveHead`
-    // (and any earlier read) may already have pulled body bytes off the socket
-    // - into the connection reader's buffer (`request.reader.in`) or into the
-    // body reader - and the raw fd would then look unreadable while the data
-    // sits in a buffer.
-    if (t.reader.bufferedLen() == 0 and t.request.reader.in.bufferedLen() == 0) {
-        if (connectionHandle(t)) |h| {
-            const deadline = effectiveDeadline(ex.between_bytes_ns, ctx.host.http_read_deadline_ns);
-            if (!(try waitReadable(h, deadline))) return WasiP2Error.ReadFailed;
-        }
-    }
-    const chunk = t.reader.peekGreedy(1) catch |e| switch (e) {
+    // Bound the actual HTTP/TLS read, including an incomplete chunk header or
+    // TLS record. Socket readiness alone does not bound those parser reads.
+    const deadline = effectiveDeadline(ex.between_bytes_ns, ctx.host.http_read_deadline_ns);
+    t.runWithDeadline(deadline, Transfer.readBody, .{t}) catch |e| switch (e) {
         error.EndOfStream => {
-            // A shutdown from `cancel` also surfaces as EOF: report the
-            // cancellation as a failed call, not as a clean end of body.
-            if (t.cancelled.load(.acquire)) return WasiP2Error.ReadFailed;
-            destroyExchange(ctx, ex); // body finished: close the connection
+            destroyExchange(ctx, ex);
             return writeStreamClosed(mem, retptr);
         },
-        else => return WasiP2Error.ReadFailed,
+        else => {
+            t.cancel(); // a failed/cancelled parser must never be reused
+            return WasiP2Error.ReadFailed;
+        },
     };
-    if (t.cancelled.load(.acquire)) return WasiP2Error.ReadFailed; // raced with cancel
+    const chunk = t.reader.buffered();
     const n = @min(want, chunk.len);
     const ptr = try ctx.reallocGuest(@intCast(n), 1);
     @memcpy(mem.sliceAt(ptr, @intCast(n)) catch return WasiP2Error.OutOfBounds, chunk[0..n]);
@@ -510,4 +525,440 @@ pub fn dropExchangeHandle(ctx: *WasiP2Ctx, rt: u32, rep: u32) void {
     if (rt == WasiP2Ctx.HTTP_P2_BODY_STREAM_RT) {
         destroyExchange(ctx, &ctx.http_p2_exchanges.items[rep]);
     }
+}
+
+test "wasi:http@0.2.x: transfer initialization survives dirty allocator memory" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var host = try Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var bytes: [@sizeOf(Transfer) + @alignOf(Transfer)]u8 = @splat(0xff);
+    var fixed = std.heap.FixedBufferAllocator.init(&bytes);
+    const t = try Transfer.create(fixed.allocator(), io, &host);
+    defer t.destroy(fixed.allocator());
+    try testing.expect(!t.cancelled.isSet());
+    try testing.expect(!t.request_initialized);
+    // Cancellation is safe even before request/connection initialization.
+    host.cancelHttp();
+    try testing.expect(t.cancelled.isSet());
+    try testing.expectError(error.Canceled, t.runWithDeadline(1, Transfer.readBody, .{t}));
+}
+
+/// A peer that makes progress once, then stalls inside an HTTP/TLS frame.
+const PartialServer = struct {
+    reply: []const u8,
+    sent: std.Io.Event = .unset,
+
+    fn serve(self: *PartialServer, io: std.Io, server: *std.Io.net.Server) void {
+        const conn = server.accept(io) catch return;
+        defer conn.close(io);
+        var buf: [4096]u8 = undefined;
+        var bufs = [_][]u8{&buf};
+        _ = conn.read(io, &bufs) catch return;
+        var writer = conn.writer(io, &buf);
+        writer.interface.writeAll(self.reply) catch return;
+        writer.interface.flush() catch return;
+        self.sent.set(io);
+        // A finite fallback also ensures a broken deadline fails the test
+        // instead of hanging the suite forever.
+        io.sleep(.fromSeconds(3), .awake) catch {};
+    }
+};
+
+fn checkPartialTimeout(reply: []const u8, scheme: p3http.Scheme, body: bool, guest_timeout: bool) !void {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    var peer: PartialServer = .{ .reply = reply };
+    var serving = try io.concurrent(PartialServer.serve, .{ &peer, io, &server });
+    defer serving.cancel(io);
+    var host = try Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    host.http_head_deadline_ns = if (guest_timeout) 30 * std.time.ns_per_s else 300 * std.time.ns_per_ms;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var req: p3http.HttpRequest = .{
+        .headers_rep = 0,
+        .authority = try std.fmt.allocPrint(testing.allocator, "127.0.0.1:{d}", .{server.socket.address.getPort()}),
+        .scheme = scheme,
+    };
+    defer req.deinit(testing.allocator);
+    var status: u16 = 0;
+    const opts: p3http.HttpRequestOptions = if (guest_timeout)
+        .{ .first_byte_timeout_ns = 300 * std.time.ns_per_ms }
+    else
+        .{};
+    const started = std.Io.Timestamp.now(io, .awake);
+    if (body) {
+        const t = try startTransfer(&ctx, &req, opts, &status);
+        defer t.destroy(testing.allocator);
+        try testing.expectEqual(@as(u16, 200), status);
+        try testing.expectError(error.ResponseTimeout, t.runWithDeadline(300 * std.time.ns_per_ms, Transfer.readBody, .{t}));
+    } else {
+        const result = startTransfer(&ctx, &req, opts, &status);
+        if (result) |t| t.destroy(testing.allocator) else |_| {}
+        try testing.expectError(error.ResponseTimeout, result);
+    }
+    const elapsed = started.durationTo(.now(io, .awake)).nanoseconds;
+    try testing.expect(elapsed >= 200 * std.time.ns_per_ms);
+    try testing.expect(elapsed < 2 * std.time.ns_per_s);
+    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+}
+
+test "wasi:http@0.2.x: partial response head cannot bypass the host deadline" {
+    try checkPartialTimeout("HTTP/1.1 200 OK\r\nContent-Length:", .http, false, false);
+}
+
+test "wasi:http@0.2.x: first-byte timeout bounds a partial response head" {
+    try checkPartialTimeout("HTTP/1.1 200 OK\r\nContent-Length:", .http, false, true);
+}
+
+test "wasi:http@0.2.x: partial chunk header cannot bypass the body deadline" {
+    try checkPartialTimeout("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nA", .http, true, false);
+}
+
+test "wasi:http@0.2.x: TLS handshake cannot bypass the host deadline" {
+    try checkPartialTimeout("", .https, false, false);
+}
+
+test "wasi:http@0.2.x: host cancellation interrupts a partial response head" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    var peer: PartialServer = .{ .reply = "HTTP/1.1 200" };
+    var serving = try io.concurrent(PartialServer.serve, .{ &peer, io, &server });
+    defer serving.cancel(io);
+    var host = try Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var req: p3http.HttpRequest = .{
+        .headers_rep = 0,
+        .authority = try std.fmt.allocPrint(testing.allocator, "127.0.0.1:{d}", .{server.socket.address.getPort()}),
+        .scheme = .http,
+    };
+    defer req.deinit(testing.allocator);
+    var status: u16 = 0;
+    var pending = try io.concurrent(startTransfer, .{ &ctx, &req, p3http.HttpRequestOptions{}, &status });
+    defer {
+        if (pending.cancel(io)) |t| t.destroy(testing.allocator) else |_| {}
+    }
+    try peer.sent.wait(io);
+    const started = std.Io.Timestamp.now(io, .awake);
+    host.cancelHttp();
+    try testing.expectError(error.Canceled, pending.await(io));
+    try testing.expect(started.durationTo(.now(io, .awake)).nanoseconds < std.time.ns_per_s);
+    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+}
+
+// ============================================================
+// wasi:http@0.2.x spellings that 0.3 renamed or dropped
+// ============================================================
+//
+// `fields.entries` (0.3: `copy-all`), the `*-timeout` getters (0.3:
+// `get-*-timeout`), and the whole `outgoing-request` resource (0.3 renamed it
+// `request` with `get-*` getters). The data model is shared with the 0.3 layer;
+// only the ABI differs, and the offsets below come from the generated bindings
+// of wasip2 1.0.4 (wasi:http 0.2.12), not from guessing:
+//
+//   result<_, header-error>        disc @0, err @1   (0.2 header-error is a
+//                                  payload-less 3-case enum; 0.3's has
+//                                  other(option<string>) and puts it at @4)
+//   result<own<fields>, header-error>  disc @0, payload @4 (handle or err)
+//   list<T>                        ptr @0, len @4
+//   option<duration>               disc @0, u64 @8
+//   method                         disc @0, other(string) @4
+//   option<scheme>                 opt @0, scheme disc @4, other(string) @8
+//   option<string>                 disc @0, ptr @4, len @8
+
+/// `result<_, header-error>` in the 0.2 layout.
+fn writeHeaderErrP2(mem: Memory, retptr: u32, e: ?p3http.FieldsError) WasiP2Error!void {
+    if (e) |err| {
+        try mem.write(retptr, @as(u8, 1));
+        try mem.write(retptr + 1, p3http.headerErrorOrdinal(err));
+    } else {
+        try mem.write(retptr, @as(u8, 0));
+    }
+}
+
+/// `option<duration>` (option<u64>: disc @0, value @8).
+fn writeOptionDuration(mem: Memory, retptr: u32, ns: ?u64) WasiP2Error!void {
+    if (ns) |v| {
+        try mem.write(retptr, @as(u8, 1));
+        try mem.write(retptr + 8, v);
+    } else {
+        try mem.write(retptr, @as(u8, 0));
+    }
+}
+
+/// `option<string>` (disc @0, ptr @4, len @8).
+fn writeOptionString(ctx: *WasiP2Ctx, mem: Memory, retptr: u32, s: ?[]const u8) WasiP2Error!void {
+    if (s) |str| {
+        try mem.write(retptr, @as(u8, 1));
+        try mem.write(retptr + 4, try p3h.http3AllocBlob(ctx, mem, str));
+        try mem.write(retptr + 8, @as(u32, @intCast(str.len)));
+    } else {
+        try mem.write(retptr, @as(u8, 0));
+    }
+}
+
+/// `[static]fields.from-list` → `result<own<fields>, header-error>`.
+pub fn p2HttpFieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    var fields: p3http.HttpFields = .{};
+    var i: u32 = 0;
+    while (i < entries_len) : (i += 1) {
+        const rec = entries_ptr + i * 16; // tuple<field-name, field-value> = 2 strings
+        const name = mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4)) catch return WasiP2Error.OutOfBounds;
+        const value = mem.sliceAt(try mem.read(u32, rec + 8), try mem.read(u32, rec + 12)) catch return WasiP2Error.OutOfBounds;
+        fields.appendChecked(ctx.alloc, name, value) catch |e| {
+            fields.deinit(ctx.alloc);
+            try mem.write(retptr, @as(u8, 1));
+            try mem.write(retptr + 4, p3http.headerErrorOrdinal(e)); // payload aligns to the own handle
+            return;
+        };
+    }
+    const handle = try p3h.http3MintFields(ctx, fields);
+    try mem.write(retptr, @as(u8, 0));
+    try mem.write(retptr + 4, handle);
+}
+
+/// `[method]fields.get` → `list<field-value>`.
+pub fn p2HttpFieldsGet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const fields = try p3h.http3FieldsSelf(ctx, self);
+    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(ctx.alloc);
+    fields.get(&values, ctx.alloc, name) catch return WasiP2Error.OutOfMemory;
+    try p3h.http3WriteValueList(ctx, mem, retptr, values.items);
+}
+
+/// `[method]fields.has` → `bool` (a plain i32 return).
+pub fn p2HttpFieldsHas(caller: *Caller, self: u32, name_ptr: u32, name_len: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const fields = try p3h.http3FieldsSelf(ctx, self);
+    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    return @intFromBool(fields.has(name));
+}
+
+/// `[method]fields.set` → `result<_, header-error>`.
+pub fn p2HttpFieldsSet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, values_ptr: u32, values_len: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const fields = try p3h.http3FieldsSelf(ctx, self);
+    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(ctx.alloc);
+    var i: u32 = 0;
+    while (i < values_len) : (i += 1) {
+        const rec = values_ptr + i * 8; // list<field-value>
+        const v = mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4)) catch return WasiP2Error.OutOfBounds;
+        values.append(ctx.alloc, v) catch return WasiP2Error.OutOfMemory;
+    }
+    fields.set(ctx.alloc, name, values.items) catch |e| return writeHeaderErrP2(mem, retptr, e);
+    try writeHeaderErrP2(mem, retptr, null);
+}
+
+/// `[method]fields.delete` → `result<_, header-error>`.
+pub fn p2HttpFieldsDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const fields = try p3h.http3FieldsSelf(ctx, self);
+    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    fields.delete(ctx.alloc, name) catch |e| return writeHeaderErrP2(mem, retptr, e);
+    try writeHeaderErrP2(mem, retptr, null);
+}
+
+/// `[method]fields.append` → `result<_, header-error>`.
+pub fn p2HttpFieldsAppend(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, value_ptr: u32, value_len: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const fields = try p3h.http3FieldsSelf(ctx, self);
+    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const value = mem.sliceAt(value_ptr, value_len) catch return WasiP2Error.OutOfBounds;
+    fields.append(ctx.alloc, name, value) catch |e| return writeHeaderErrP2(mem, retptr, e);
+    try writeHeaderErrP2(mem, retptr, null);
+}
+
+/// `[method]fields.entries` → `list<tuple<field-name, field-value>>`: every
+/// pair in insertion order, repeated names included (0.3 spells this
+/// `copy-all`).
+pub fn p2HttpFieldsEntries(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const fields = try p3h.http3FieldsSelf(ctx, self);
+    const n = fields.entries.items.len;
+    const base = if (n == 0) 4 else try ctx.reallocGuest(@intCast(n * 16), 4);
+    for (fields.entries.items, 0..) |p, i| {
+        const rec = base + @as(u32, @intCast(i * 16));
+        try mem.write(rec, try p3h.http3AllocBlob(ctx, mem, p.name));
+        try mem.write(rec + 4, @as(u32, @intCast(p.name.len)));
+        try mem.write(rec + 8, try p3h.http3AllocBlob(ctx, mem, p.value));
+        try mem.write(rec + 12, @as(u32, @intCast(p.value.len)));
+    }
+    try mem.write(retptr, base);
+    try mem.write(retptr + 4, @as(u32, @intCast(n)));
+}
+
+/// `[method]fields.clone` → `own<fields>` (a plain i32 return).
+pub fn p2HttpFieldsClone(caller: *Caller, self: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const src = try p3h.http3FieldsSelf(ctx, self);
+    var copy: p3http.HttpFields = .{};
+    src.cloneInto(ctx.alloc, &copy) catch {
+        copy.deinit(ctx.alloc);
+        return WasiP2Error.OutOfMemory;
+    };
+    copy.immutable = src.immutable; // a clone of an immutable view stays immutable
+    return p3h.http3MintFields(ctx, copy);
+}
+
+/// `[method]request-options.connect-timeout` (0.2 name) → `option<duration>`.
+pub fn p2HttpRequestOptionsConnectGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    return requestOptionsTimeoutGet(caller, self, retptr, "connect_timeout_ns");
+}
+
+/// `[method]request-options.first-byte-timeout`.
+pub fn p2HttpRequestOptionsFirstByteGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    return requestOptionsTimeoutGet(caller, self, retptr, "first_byte_timeout_ns");
+}
+
+/// `[method]request-options.between-bytes-timeout`.
+pub fn p2HttpRequestOptionsBetweenBytesGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    return requestOptionsTimeoutGet(caller, self, retptr, "between_bytes_timeout_ns");
+}
+
+fn requestOptionsTimeoutGet(caller: *Caller, self: u32, retptr: u32, comptime field: []const u8) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const rep = ctx.resources.rep(WasiP2Ctx.HTTP_REQOPTS_RT, self) catch
+        try ctx.resources.rep(WasiP2Ctx.HTTP_REQOPTS_VIEW_RT, self);
+    if (rep >= ctx.http_reqopts.items.len) return WasiP2Error.InvalidHandle;
+    return writeOptionDuration(mem, retptr, @field(ctx.http_reqopts.items[rep], field));
+}
+
+/// `[method]outgoing-request.method` → `method` (disc @0, `other` string @4).
+pub fn p2HttpOutgoingRequestMethod(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const req = try outgoingRequestOf(ctx, self);
+    const ord: u8 = switch (req.method) {
+        .get => 0,
+        .head => 1,
+        .post => 2,
+        .put => 3,
+        .delete => 4,
+        .connect => 5,
+        .options => 6,
+        .trace => 7,
+        .patch => 8,
+        .other => 9,
+    };
+    try mem.write(retptr, ord);
+    if (req.method == .other) {
+        try mem.write(retptr + 4, try p3h.http3AllocBlob(ctx, mem, req.method.other));
+        try mem.write(retptr + 8, @as(u32, @intCast(req.method.other.len)));
+    }
+}
+
+/// `[method]outgoing-request.set-method` → `result` (0 = ok, 1 = err).
+pub fn p2HttpOutgoingRequestSetMethod(caller: *Caller, self: u32, disc: u32, ptr: u32, len: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const req = try outgoingRequestOf(ctx, self);
+    const next: p3http.Method = switch (disc) {
+        0 => .get,
+        1 => .head,
+        2 => .post,
+        3 => .put,
+        4 => .delete,
+        5 => .connect,
+        6 => .options,
+        7 => .trace,
+        8 => .patch,
+        9 => blk: {
+            const s = mem.sliceAt(ptr, len) catch return WasiP2Error.OutOfBounds;
+            if (!p3http.validMethod(s)) return 1;
+            break :blk .{ .other = ctx.alloc.dupe(u8, s) catch return WasiP2Error.OutOfMemory };
+        },
+        else => return 1,
+    };
+    req.method.deinit(ctx.alloc);
+    req.method = next;
+    return 0;
+}
+
+/// `[method]outgoing-request.scheme` → `option<scheme>`.
+pub fn p2HttpOutgoingRequestScheme(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const req = try outgoingRequestOf(ctx, self);
+    const scheme = req.scheme orelse {
+        try mem.write(retptr, @as(u8, 0));
+        return;
+    };
+    try mem.write(retptr, @as(u8, 1));
+    switch (scheme) {
+        .http => try mem.write(retptr + 4, @as(u8, 0)),
+        .https => try mem.write(retptr + 4, @as(u8, 1)),
+        .other => |s| {
+            try mem.write(retptr + 4, @as(u8, 2));
+            try mem.write(retptr + 8, try p3h.http3AllocBlob(ctx, mem, s));
+            try mem.write(retptr + 12, @as(u32, @intCast(s.len)));
+        },
+    }
+}
+
+/// `[method]outgoing-request.authority` → `option<string>`.
+pub fn p2HttpOutgoingRequestAuthority(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const req = try outgoingRequestOf(ctx, self);
+    return writeOptionString(ctx, mem, retptr, req.authority);
+}
+
+/// `[method]outgoing-request.path-with-query` → `option<string>`.
+pub fn p2HttpOutgoingRequestPathWithQuery(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const mem = try ctx_mod.ctxMemory(caller);
+    const req = try outgoingRequestOf(ctx, self);
+    return writeOptionString(ctx, mem, retptr, req.path_with_query);
+}
+
+/// `[method]outgoing-request.headers` → `own<fields>`. The WIT says the
+/// returned resource is immutable, so this is an immutable SNAPSHOT: `set`,
+/// `append` and `delete` on it fail `header-error.immutable`.
+pub fn p2HttpOutgoingRequestHeaders(caller: *Caller, self: u32) WasiP2Error!u32 {
+    const ctx = caller.data(WasiP2Ctx);
+    const req = try outgoingRequestOf(ctx, self);
+    if (req.headers_rep >= ctx.http_fields.items.len) return WasiP2Error.InvalidHandle;
+    var copy: p3http.HttpFields = .{};
+    ctx.http_fields.items[req.headers_rep].cloneInto(ctx.alloc, &copy) catch {
+        copy.deinit(ctx.alloc);
+        return WasiP2Error.OutOfMemory;
+    };
+    copy.immutable = true;
+    const idx: u32 = @intCast(ctx.http_fields.items.len);
+    ctx.http_fields.append(ctx.alloc, copy) catch {
+        copy.deinit(ctx.alloc);
+        return WasiP2Error.OutOfMemory;
+    };
+    return ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, idx);
 }

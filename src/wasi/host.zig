@@ -188,8 +188,10 @@ pub const Host = struct {
     /// layer installs the function and the target while a transfer is live and
     /// clears the target when it ends; a host-side canceller (generation
     /// retirement, shutdown) calls `cancelHttp` from another thread, which
-    /// shuts the socket down so a blocked body read returns instead of waiting
-    /// for its deadline. Atomic because the two sides are different threads.
+    /// signals cancellation so blocked network IO returns. The mutex protects
+    /// the callback AND its target until the callback returns; an atomic pointer
+    /// alone cannot keep a target alive after a canceller has loaded it.
+    http_cancel_mutex: std.Io.Mutex = .init,
     http_cancel_fn: ?*const fn (*anyopaque) void = null,
     http_cancel_target: std.atomic.Value(?*anyopaque) = std.atomic.Value(?*anyopaque).init(null),
 
@@ -217,7 +219,6 @@ pub const Host = struct {
     /// reports true.
     calls_in_flight: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
 
     pub const HostImport = struct {
         /// Interface name as it appears in the component (version stripped),
@@ -287,9 +288,31 @@ pub const Host = struct {
         return true;
     }
 
+    /// Publish a fully initialized cancellation target. The callback must only
+    /// signal cancellation; it must not wait for the guest or re-enter this lock.
+    pub fn registerHttpCancel(self: *Host, io: std.Io, target: *anyopaque, callback: *const fn (*anyopaque) void) void {
+        self.http_cancel_mutex.lockUncancelable(io);
+        defer self.http_cancel_mutex.unlock(io);
+        self.http_cancel_fn = callback;
+        self.http_cancel_target.store(target, .release);
+    }
+
+    /// On return no canceller can still be using this target, so it may be freed.
+    pub fn unregisterHttpCancel(self: *Host, io: std.Io, target: *anyopaque) void {
+        self.http_cancel_mutex.lockUncancelable(io);
+        defer self.http_cancel_mutex.unlock(io);
+        if (self.http_cancel_target.load(.acquire) == target) {
+            self.http_cancel_target.store(null, .release);
+            self.http_cancel_fn = null;
+        }
+    }
+
     /// Cancel the live p2 http transfer, if any. Safe to call from any thread;
     /// a no-op when nothing is in flight.
     pub fn cancelHttp(self: *Host) void {
+        const io = self.io orelse return;
+        self.http_cancel_mutex.lockUncancelable(io);
+        defer self.http_cancel_mutex.unlock(io);
         const f = self.http_cancel_fn orelse return;
         const target = self.http_cancel_target.load(.acquire) orelse return;
         f(target);
@@ -593,4 +616,49 @@ test "Host.deinit: leak-clean with un-materialized pending preopens" {
     try h.addPendingPreopen("/tmp", "/t");
     try h.addPendingPreopen("/var", "/v");
     h.deinit();
+}
+
+test "wasi:http@0.2.x: unregister waits for a canceller holding the target" {
+    const State = struct {
+        host: *Host,
+        io: std.Io,
+        entered: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        unregistering: std.Io.Event = .unset,
+        unregistered: std.Io.Event = .unset,
+
+        fn callback(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.entered.set(self.io);
+            self.release.waitUncancelable(self.io);
+        }
+
+        fn unregister(self: *@This()) void {
+            self.unregistering.set(self.io);
+            self.host.unregisterHttpCancel(self.io, self);
+            self.unregistered.set(self.io);
+        }
+    };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var host = try Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var state: State = .{ .host = &host, .io = io };
+    host.registerHttpCancel(io, &state, State.callback);
+    var canceller = try std.Thread.spawn(.{}, Host.cancelHttp, .{&host});
+    defer canceller.join();
+    defer state.release.set(io);
+    try state.entered.wait(io);
+    var unregister = try std.Thread.spawn(.{}, State.unregister, .{&state});
+    defer unregister.join();
+    defer state.release.set(io);
+    try state.unregistering.wait(io);
+    try io.sleep(.fromMilliseconds(30), .awake);
+    try testing.expect(!state.unregistered.isSet());
+    state.release.set(io);
+    try state.unregistered.wait(io);
+    try testing.expect(host.http_cancel_target.load(.acquire) == null);
+    host.cancelHttp(); // no callback can use the retired target
 }
