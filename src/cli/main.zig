@@ -355,9 +355,17 @@ pub fn main(init: std.process.Init) !void {
                 // The guest's fd 0 (#257, #508): both hosts read the process
                 // stdin on demand, so nothing is read before the guest runs.
                 const code = cli_run.runComponentWasi(gpa, io, run_bytes, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, .inherit) catch |err| {
-                    var buf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
-                    try printlnErr(io, msg);
+                    // A refusal that knows WHICH import is missing says so: the
+                    // diagnostic names the interface and function.
+                    if (zwasm.diagnostic.lastDiagnostic()) |diag| {
+                        var buf: [512]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run component '{s}': {s} ({s})", .{ path, @errorName(err), diag.message() }) catch "zwasm run: component run failed";
+                        try printlnErr(io, msg);
+                    } else {
+                        var buf: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
+                        try printlnErr(io, msg);
+                    }
                     std.process.exit(1);
                 };
                 std.process.exit(code);
