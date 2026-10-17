@@ -2,9 +2,9 @@
 
 上游：<https://github.com/zwasm/zwasm>
 基线提交：`442f746a63c517d2545697aa174d9394f88086f7`（v2.7.0 之后、`#512` 修复）
-**已 rebase 到上游 main `e63382423`（2026-10-17，8 个提交）**；rebase 本身零冲突，代价是移植上游新代码的 4 处 0.18 差异（见下 `p7`）。
+**当前基点：上游 main `af3b0fec1`**（2026-10-17 第二次 rebase；上游 #535 已并入，我们的 D-445 兜底随之删除，见 `p7b`）。
 工作分支：`zig-0.18-port`（fork remote：`fork` = https://github.com/uright008/zwasm）
-工具链：Zig `0.18.0-dev.210+3626a240e`（上游要求 0.16；本 fork 已迁到 0.18-dev）
+工具链：Zig 0.18-dev。本机与 snooze 的 `minimum_zig_version` 是 `0.18.0-dev.210+3626a240e`，而**该构建已被 ziglang.org 清理**；CI（`.github/workflows/port-gate.yml`）因此运行时解析当前 master，实测在更新的 dev（+43 构建）上同样全绿。
 
 本文件是 rebase 时的工作清单：每条补丁记录动机、上游 issue、以及上游若自行修复后如何降级。
 **不要只靠 commit message**——上游一旦采纳其中某条，这里的「处置」列就是删除依据。
@@ -24,6 +24,9 @@
 | p4a | `feat(http): stream the response body from the live connection` | `handle` 只做 connect/send/head；body 由 guest 的 `read` 按需从活连接拉，固定 16 KiB transfer 缓冲，**去掉 8 MiB eager 上限**；transfer 单块堆分配（std 的指针自引用） | 上游 p2 http 尚缺 | 可上游化 |
 | ci1 | `ci: a gate for the port branch, on the current Zig 0.18-dev` | 新增 `.github/workflows/port-gate.yml`：运行时从 ziglang.org index 解析**当前** master dev 构建（dev 构建会被官网清理，写死 URL 必烂；`ZIG_VERSION` 可钉），装 wasm-tools，跑 `zig build` + 单元套件 + 核心 spec + 组件模型 spec + wasm 3.0（interp lane）。**首次运行全绿**，且用的是当时的 master dev（比本地 dev.210 新约 43 个构建）——说明移植不只在一个 dev 构建上成立 | 上游 ci.yml 钉 0.16 且只跑 main/PR，从不覆盖本分支 | fork 专属；上游迁 0.18 后可删 |
 | p7b | `port: rebase onto upstream af3b0fec1 (#535 landed) and drop our redundant narrowing` | 第二次 rebase（#535「坏句柄 → Unreachable」已上游化）：注册臂改用上游的 `defineMapped(..., mapGuestFault)`；**删掉我们 `hostFnError` 的兜底窄化**（上游 #535 的测试明确要求未 opt-in 的宿主函数保留 embedder 自己的错误）；`isGuestFault` 仅留给非宿主函数路径。移植点：`mapGuestFault` 的 `error_set.?` → `error_names.?`；我们的 `WasiP2Error.OutOfBounds` → `OutOfBoundsLoad` | 上游已实现 D-445 | 分歧已消解，仅剩 `isGuestFault` 兜底 |
+| p8a | `feat(host): expose the interrupt and generalize host-IO cancellation` | `Opened.interrupt()` 跨线程停住 guest 调用（解释器每 1024 步轮询中断位 → `error.Interrupted`，`ComponentInstance`/`BuiltComponent` 两种形态都覆盖）；Host 的取消注册表单槽 → `(target, callback)` 列表 + `cancelHostIo()`（`registerHttpCancel`/`cancelHttp` 保留别名；锁跨回调，因为上游测试钉住「unregister 不能在 canceller 还可能用着目标时返回」）；`wasi:clocks` 等待改 20ms 切片 + 让位 `isClosing()`，`Host.clocks_wait_max_ns` 可选硬上限 | 上游无（机制通用；snooze 用它做每插件 deadline） | **可上游化**（通用机制） |
+| p8b | `safety: guest lengths and guest addresses are checked, so overflow traps` | `listBytes`/`listBytesOf`/`guestPtr` 三个咽喉点：guest 长度 × 元素大小、guest 基址 + 偏移。溢出 → `OutOfBoundsStore`/`OutOfBoundsLoad`（上游 #535 刻意保留为内存 trap，不折成 Unreachable）。替换 **8 处 size 乘法 + 7 处指针推导**；指针那批即使尺寸已 checked 也必须查（环绕到低地址会静默读写错地方） | 上游同类问题存在（未修） | **可上游化**（通用安全修复） |
+| p8c | `test: join the closer thread once (the CI runner caught the double join)` | 测试里 `defer join` + 显式 join 的双重 join：本地侥幸通过、CI runner ABRT。已全局扫描确认树内无第二处 | — | 随 p8a 一起上游化 |
 | p7 | `port: rebase onto upstream main (8 commits) and keep D-445 at the new choke point` | rebase 后上游新代码的 0.18 差异 4 处：① `errdefer \|err\|`（0.18 无捕获式）→ `run` 拆成包装 + `catch \|err\|`；② `@typeInfo(E).error_set` 非可选且不可迭代 → `error_names.?`；③④ `@typeInfo(P).pointer.alignment` → `pointer.attrs.@"align"`。另把 D-445 窄化搬到 `hostFnError`（上游新咽喉点），名单抽成 `Instance.isGuestFault` | 上游仍在 0.16 | 上游迁 0.18 后整条删除；分歧随上游 #535/PR #549 合并而消解 |
 | p6f | `feat(cli): say which import a component was refused for` | `zwasm run` 在 `UnsupportedWasiImport` 时追加诊断（接口#函数 + 代）；实测服务端面 `wasi:http/types#[method]incoming-request.consume` 被明确报出 | 通用改进 | 可上游化 |
 | p6e | `feat(http): transport failures carry their real error-code` | `handle` 的传输失败不再一律 `internal-error`：`errorCodeFor` 映射到规范错误码（connection-timeout / connection-refused / connection-terminated / destination-unavailable / DNS-error / TLS-protocol-error / TLS-certificate-error / HTTP-protocol-error，catch-all 仍 internal-error）；序号取 0.2.12 声明序。**遗留**：body 读失败仍以调用失败结束，未走 `stream-error::last-operation-failed`（需要 error 资源） | 上游 p2 http 尚缺 | 可上游化 |
@@ -54,23 +57,81 @@
 | p6 | 标准 p2 HTTP（`wasi:http/types` + `outgoing-handler`）、流式/背压、取消 | [zwasm-fork-feasibility.md](zwasm-fork-feasibility.md) §4 |
 | p7 | snooze 专属语义（能力目录、改权=停旧→drain→重建）——**不进上游** | 同上 |
 
+## 上游 PR 候选（与上游同步用）
+
+**关键前提**：这些提交都坐在 **Zig 0.18 移植**（p1/p2/p3b/p3c）之上，而**上游仍在 0.16**。
+所以它们**不能 cherry-pick 到上游** —— 必须按上游的 0.16 形状**重写一遍**（改动本身多数与
+Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写时照着看即可。
+
+| 候选 | fork 提交 | 载荷（重写时看这些文件/函数） | 关联上游 |
+| --- | --- | --- | --- |
+| host fn 错误归一化 | `987bbfec8`（部分） | `zwasm/host_func_marshal.zig` 的 `hostFnError`；`zwasm/instance.zig` 的 `mapDispatchErr` | **#519 已由上游 `f45dad90d` 修** |
+| 大帧 JIT decline | `f8183217d` | `platform/stack_limit.zig`（headroom 1 MiB）+ `engine/codegen/{x86_64,arm64}/emit.zig` 的 prologue decline + `codegen/shared/decline_note.zig` | #495（open） |
+| thunk 武装 | `987bbfec8`（后半） | 三个 mixed multi-result thunk + `invokeBufferWrite` 的 `ensureInstalled()` + `stack_limit` | #302（open） |
+| 跨线程中断 | `4f8f79605` | `zwasm/instance.zig:interrupt`（上游已有）+ `api/component.zig` 的 `Opened.interrupt`/`ComponentInstance.interrupt` + `api/component_wasi_p2.zig` 的 `BuiltComponent.interrupt` | 新（无 issue） |
+| 泛化宿主 IO 取消 | `4f8f79605` | `wasi/host.zig` 的注册表（`registerHostCancel`/`unregisterHostCancel`/`cancelHostIo`）+ `component_wasi_p2_http.zig` 的注册调用点 | 新（无 issue） |
+| 时钟等待可中断 | `4f8f79605` | `component_wasi_ctx.zig:p2WaitDeadlineSync` 切片 + `Host.clocks_wait_max_ns` | 新（无 issue） |
+| checked 算术 | `111629ca5` | `component_wasi_ctx.zig` 的 `listBytes`/`listBytesOf`/`guestPtr` + 15 处调用点 + `test/component/poll_huge_len.{wat,wasm}` | 新（无 issue） |
+| 嵌入者 seam | `24a9f3ca6` | `wasi/host.zig` 的 `host_imports`/`admission_fn` + `component_wasi_p2.zig:synthDef` 的准入点 | 新（无 issue） |
+| p2 HTTP 客户端 | `d8866db63`…`7fa86e1fe` | 整个 `api/component_wasi_p2_http.zig` + `wasi/adapter.zig` 的 `Entry.op_p2` + 注册臂 | 新（无 issue） |
+
+**怎么取载荷**：`git show <commit> -- <file>`；在上游 0.16 检出上按同样语义重写，**不要直接
+`git apply`**（0.18 移植的语法改动会冲突：`errdefer |err|`、`error_set.error_names`、
+`pointer.attrs.@"align"`、`std.Io` 操作模型等）。
+
+**同步节奏建议**：每次上游 rebase 后回头核对本表 —— 上游修掉的候选（如 #519）立即从表中删除，
+并删掉 fork 里对应的那部分（`p3` 的前半就是这么消失的）。
+
 ## 需要发到上游的内容（issue 文案见 zwasm-fork-plan.md 附录）
 
-1. 评论 [#519](https://github.com/zwasm/zwasm/issues/519)：一行安全网 + 注册边界归一化建议。
-2. 新 issue：未归一化的宿主错误是一类（p2 层 `mapAsyncFault` 0 处调用 vs 59 处直通；坏 `(ptr,len)` 走 `OutOfBounds` 同样 abort）。
-3. 评论 [#495](https://github.com/zwasm/zwasm/issues/495)：探针在 `SUB RSP` 之前、处理器不分类栈 fault；四个修法方向请上游选。
-4. 评论 [#302](https://github.com/zwasm/zwasm/issues/302)：生产路径 `entry_buffer_write.zig` 同样缺 `ensureInstalled`（本 fork 已修）。
-5. 新 issue：Zig 0.18 迁移计划询问（若上游要迁，p1/p2 可贡献）。
+**已不需要**：`#519`（上游 `f45dad90d` 已修，语义与我们一致）、`#512`（本 fork 的基线就是它的修复）、`#535`（上游已并入，我们的兜底随之删除）。
 
-## rebase 流程
+仍要发的：
+
+1. 评论 [#495](https://github.com/zwasm/zwasm/issues/495)：探针在 `SUB RSP` 之前、处理器不分类栈 fault；四个修法方向请上游选。
+2. 评论 [#302](https://github.com/zwasm/zwasm/issues/302)：生产路径 `entry_buffer_write.zig` 同样缺 `ensureInstalled`（本 fork 已修）。
+3. 新 issue / PR：上表里标「新（无 issue）」的通用机制（中断、泛化取消、checked 算术、嵌入者 seam）——建议**直接开 PR**，比 issue 更有说服力。
+4. 询问：Zig 0.18 迁移计划（若上游要迁，p1/p2/p3b/p3c 可贡献；目前上游仍 0.16）。
+
+## rebase 流程（当前配方）
 
 ```sh
-git fetch upstream
-git rebase --onto upstream/<new-tag> 442f746a6 snooze/base   # 或按需 cherry-pick
-zig build && zig build test                                  # 见下
+cd /home/uright/zwasm-fork
+git fetch origin main
+git rev-list --count HEAD..origin/main            # 领先多少提交
+git branch -f backup-$(date +%m%d) HEAD           # 先留后路
+git rebase --onto origin/main <上一次的基点> zig-0.18-port
 ```
 
-**本机已验证（2026-10-15，`zig-0.18-port`）：**
+**基点写在文件顶部**（当前 `af3b0fec1`）。rebase 冲突通常只有一类：**上游改了注册臂的风格**
+（如 #535 把 `lk.defineFuncCtx(...)` 换成 `defineMapped(..., mapGuestFault)`），而我们那些提交
+在同一个 switch 里加臂 —— 解法是取上游风格，把我们新增的臂按同样风格重写，**不要整文件取一边**
+（会把该提交里非臂的改动一起丢掉：import、drop 分支、subscribe、write 路由都吃过这个亏）。
+
+**rebase 后必查的移植点**（上游新代码里的 0.18 差异，每类都出现过）：
+
+| 上游写法 | 0.18 的改法 |
+| --- | --- |
+| `errdefer \|err\| ...` | 0.18 无捕获式 errdefer → 拆包装函数 + `catch \|err\|` |
+| `@typeInfo(E).error_set.?` / `inline for (...error_set)` | → `error_set.error_names.?` + `@field(E, name)` |
+| `@typeInfo(P).pointer.alignment` | → `pointer.attrs.@"align"` |
+| `b.standardOptimizeOption(.{})` / `std.builtin.OptimizeMode` | → `orelse .debug` / `lang.Optimize` 小写字段 |
+| 内存错误 `OutOfBounds` | → 上游拆成 `OutOfBoundsLoad`/`OutOfBoundsStore` |
+
+**验收顺序**：`zig build` → `zig build test`（核心套件）→ 推送后看 CI（`port-gate` 会跑 spec 语料，
+且用当前 master dev 构建；本地 dev.210 的"绿"不代表 CI 绿 —— 双重 join 那次就是本地绿、CI ABRT）。
+
+**最新验证（2026-10-17，`zig-0.18-port` @ `fc553bf0e`）：**
+
+- 核心套件 **3303 passed / 12 skipped / 0 failed**；`zig build` 0 错误。
+- **CI 全绿**（`port gate` 39056910247）：Build / 单元套件 / 核心 spec / 组件模型 spec / wasm 3.0（interp）
+  全部通过，且用的是**当时 master 的 dev 构建**（比本地 dev.210 新约 43 个构建）。
+- 新增回归：跨线程 `Opened.interrupt()` 停住自旋 guest（`< 1s`，`error.Interrupted`）；
+  `Host.cancelHostIo()` 多目标取消（含 unregister 等待语义）；一小时 `wait-until` 被 `beginClose()` 打断；
+  `in_len = 0x4000_0000` 调 `wasi:io/poll#poll` → guest 看到 `OutOfBoundsStore`（**未检查时该 fixture 会
+  `panic: integer overflow` 打死进程**，红/绿已验）。
+
+**更早（2026-10-15）：**
 
 - `zig build`：通过（仅 spec-assert 目标因缺外部 `wasm-tools` 失败，非代码问题）。
 - 核心测试套件：**3268 passed / 12 skipped / 0 failed**。
