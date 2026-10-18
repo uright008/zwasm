@@ -91,7 +91,41 @@ pub const EnvEntry = struct {
 pub const PreopenEntry = struct {
     host_fd: std.posix.fd_t,
     guest_path: []const u8,
+    /// The preopen was granted read-only. The hard boundary is the rights
+    /// table: a read-only preopen's slot never carries the rights that modify
+    /// the directory or a file's contents, so every operation that needs one is
+    /// already refused by `resolve`'s `has(needed)` with `notcapable`. Recorded
+    /// here so the embedder can report what it granted.
+    read_only: bool = false,
 };
+
+/// What an embedder may ask for when it adds a preopen.
+pub const PreopenOptions = struct {
+    /// No right that modifies the directory or a file's contents is granted.
+    read_only: bool = false,
+};
+
+/// Rights whose operation changes the directory or a file's contents. A
+/// read-only preopen drops all of them; the rest (`path_open`, `fd_readdir`,
+/// `path_readlink`, the `*_filestat_get`s, `path_link`'s SOURCE side) only look.
+///
+/// `PATH_LINK_SOURCE` stays: hard-linking a file OUT of a read-only directory
+/// does not modify it, while `PATH_LINK_TARGET` (linking INTO it) does.
+pub const WRITE_RIGHTS: p1.Rights = p1.RIGHTS_FD_DATASYNC |
+    p1.RIGHTS_FD_WRITE |
+    p1.RIGHTS_FD_ALLOCATE |
+    p1.RIGHTS_FD_FILESTAT_SET_SIZE |
+    p1.RIGHTS_FD_FILESTAT_SET_TIMES |
+    p1.RIGHTS_PATH_CREATE_DIRECTORY |
+    p1.RIGHTS_PATH_CREATE_FILE |
+    p1.RIGHTS_PATH_LINK_TARGET |
+    p1.RIGHTS_PATH_RENAME_SOURCE |
+    p1.RIGHTS_PATH_RENAME_TARGET |
+    p1.RIGHTS_PATH_FILESTAT_SET_SIZE |
+    p1.RIGHTS_PATH_FILESTAT_SET_TIMES |
+    p1.RIGHTS_PATH_SYMLINK |
+    p1.RIGHTS_PATH_REMOVE_DIRECTORY |
+    p1.RIGHTS_PATH_UNLINK_FILE;
 
 /// A preopen REQUEST queued by a config builder that has no io
 /// token at config time (the C-API `zwasm_wasi_config_preopen_dir`,
@@ -500,15 +534,36 @@ pub const Host = struct {
         host_fd: std.posix.fd_t,
         guest_path: []const u8,
     ) !p1.Fd {
+        return self.addPreopenWith(host_fd, guest_path, .{});
+    }
+
+    /// `addPreopen` with the grant spelled out; `read_only` drops every right
+    /// that would modify the directory or a file's contents.
+    pub fn addPreopenWith(
+        self: *Host,
+        host_fd: std.posix.fd_t,
+        guest_path: []const u8,
+        opts: PreopenOptions,
+    ) !p1.Fd {
         const path_copy = try self.alloc.dupe(u8, guest_path);
         errdefer self.alloc.free(path_copy);
         const new_preopens = try self.alloc.realloc(self.preopens, self.preopens.len + 1);
-        new_preopens[self.preopens.len] = .{ .host_fd = host_fd, .guest_path = path_copy };
+        new_preopens[self.preopens.len] = .{
+            .host_fd = host_fd,
+            .guest_path = path_copy,
+            .read_only = opts.read_only,
+        };
         self.preopens = new_preopens;
         try self.fd_table.append(self.alloc, .{
             .kind = .dir,
-            .rights_base = p1.RIGHTS_DIRECTORY_BASE,
-            .rights_inheriting = p1.RIGHTS_DIRECTORY_INHERITING,
+            .rights_base = if (opts.read_only)
+                p1.RIGHTS_DIRECTORY_BASE & ~WRITE_RIGHTS
+            else
+                p1.RIGHTS_DIRECTORY_BASE,
+            .rights_inheriting = if (opts.read_only)
+                p1.RIGHTS_DIRECTORY_INHERITING & ~WRITE_RIGHTS
+            else
+                p1.RIGHTS_DIRECTORY_INHERITING,
             .host_handle = host_fd,
         });
         return @intCast(self.fd_table.items.len - 1);

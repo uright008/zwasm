@@ -1096,3 +1096,66 @@ test "path_open: a symlink component cannot leave the preopen (p10)" {
     @memcpy(mem[0..up.len], up);
     try testing.expectEqual(p1.Errno.success, pathFilestatGet(&h, &mem, dirfd, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, up.len, stat_at));
 }
+
+test "read-only preopen: reads pass, every mutating op is notcapable (p10 step C)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.writeFile(testing.io, .{ .sub_path = "file.txt", .data = "hello" });
+    try root.createDir(testing.io, "victim", std.Io.File.Permissions.default_dir);
+
+    // The grant is the boundary: a read-only preopen never carries a right that
+    // modifies the directory or a file's contents, so the existing
+    // `has(needed)` check refuses every such op without a new check anywhere.
+    const ro = try h.addPreopenWith(tmp.dir.handle, "/ro", .{ .read_only = true });
+    const rw = try h.addPreopenWith(tmp.dir.handle, "/rw", .{});
+
+    var mem: [256]u8 = @splat(0);
+    const out_ptr = 128;
+
+    // Reads pass on the read-only preopen.
+    const read_path = "file.txt";
+    @memcpy(mem[0..read_path.len], read_path);
+    try testing.expectEqual(p1.Errno.success, pathFilestatGet(&h, &mem, ro, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, read_path.len, out_ptr));
+    try testing.expectEqual(p1.Errno.success, @import("fd.zig").pathOpen(&h, &mem, ro, 0, 0, read_path.len, 0, p1.RIGHTS_FD_READ, 0, 0, out_ptr));
+
+    // Every mutating op is refused, and says why: not capable.
+    const dir_path = "newdir";
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..dir_path.len], dir_path);
+    try testing.expectEqual(p1.Errno.notcapable, pathCreateDirectory(&h, &mem, ro, 0, dir_path.len));
+    // ...and the SAME call succeeds on a read-write preopen, so the refusal is
+    // the grant and not the operation.
+    try testing.expectEqual(p1.Errno.success, pathCreateDirectory(&h, &mem, rw, 0, dir_path.len));
+
+    const unlink = "file.txt";
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..unlink.len], unlink);
+    try testing.expectEqual(p1.Errno.notcapable, @import("fd.zig").pathUnlinkFile(&h, &mem, ro, 0, unlink.len));
+    try testing.expectEqual(p1.Errno.success, @import("fd.zig").pathUnlinkFile(&h, &mem, rw, 0, unlink.len));
+
+    const victim = "victim";
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..victim.len], victim);
+    try testing.expectEqual(p1.Errno.notcapable, pathRemoveDirectory(&h, &mem, ro, 0, victim.len));
+    try testing.expectEqual(p1.Errno.success, pathRemoveDirectory(&h, &mem, rw, 0, victim.len));
+
+    // Opening for write, and creating, are the same story. (The path goes into
+    // the buffer again, because the previous call left another one there.)
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..unlink.len], unlink);
+    try testing.expectEqual(p1.Errno.notcapable, @import("fd.zig").pathOpen(&h, &mem, ro, 0, 0, unlink.len, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE, 0, 0, out_ptr));
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..unlink.len], unlink);
+    try testing.expectEqual(p1.Errno.success, @import("fd.zig").pathOpen(&h, &mem, rw, 0, 0, unlink.len, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE, 0, 0, out_ptr));
+    // Timestamps too.
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..unlink.len], unlink);
+    try testing.expectEqual(p1.Errno.notcapable, pathFilestatSetTimes(&h, &mem, ro, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, unlink.len, 0, 0, p1.FSTFLAGS_ATIM | p1.FSTFLAGS_MTIM));
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..unlink.len], unlink);
+    try testing.expectEqual(p1.Errno.success, pathFilestatSetTimes(&h, &mem, rw, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, unlink.len, 0, 0, p1.FSTFLAGS_ATIM | p1.FSTFLAGS_MTIM));
+}
