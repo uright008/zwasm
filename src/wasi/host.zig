@@ -198,7 +198,7 @@ pub const Host = struct {
     /// `cancelHostIo`, which signals all of them so the blocked calls return
     /// instead of parking the runtime thread. Bounded work: registrations are
     /// per in-flight operation, not per instance.
-    host_cancels: std.ArrayListUnmanaged(HostCancel) = .empty,
+    host_cancels: std.ArrayList(HostCancel) = .empty,
 
     /// Component imports the embedder registers itself (snooze fork). An
     /// interface that is neither a WASI row nor listed here is refused at link

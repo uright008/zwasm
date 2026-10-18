@@ -1875,3 +1875,48 @@ test "D-335 unit C: stream/future values flatten/lower/lift as i32 handles" {
     const lifted = try liftFlat(cx, a, future_ty, &.{CoreValue.fromI32(7)}, &idx);
     try testing_.expectEqual(@as(u32, 7), lifted.handle);
 }
+
+test "adversarial: a hostile string (ptr, len) traps instead of wrapping" {
+    // A guest chooses BOTH halves of every string it hands the host, so the pair
+    // is hostile input. The byte range must be computed in usize (a u32 sum
+    // wraps to a LOW address and the host would read bytes the guest never
+    // named), the length must be capped before any allocation, and the boundary
+    // cases must stay legal rather than becoming off-by-one refusals.
+    var mem = @as([64]u8, @splat(0x41));
+    var bump = Bump{ .next = 0 };
+    var mem_slice: []u8 = &mem;
+    const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
+
+    // `ptr + len` wraps u32 (0xFFFF_FFF0 + 0x40 = 0x30): out of bounds, NOT the
+    // bytes at 0x30.
+    try testing.expectError(StringError.OutOfBounds, liftString(cx, testing.allocator, 0xFFFF_FFF0, 0x40));
+    // u32 max length: the cap answers before any arithmetic.
+    try testing.expectError(StringError.StringTooLong, liftString(cx, testing.allocator, 0, 0xFFFF_FFFF));
+    // The cap boundary: MAX+1 is too long at all; MAX is within the cap and the
+    // bounds check is what refuses it here.
+    try testing.expectError(StringError.StringTooLong, liftString(cx, testing.allocator, 0, MAX_STRING_BYTE_LENGTH + 1));
+    try testing.expectError(StringError.OutOfBounds, liftString(cx, testing.allocator, 0, MAX_STRING_BYTE_LENGTH));
+    // Empty at the very end is legal; one past the end is not.
+    const empty = try liftString(cx, testing.allocator, @intCast(mem.len), 0);
+    testing.allocator.free(empty);
+    try testing.expectError(StringError.OutOfBounds, liftString(cx, testing.allocator, @intCast(mem.len + 1), 0));
+    // Ending exactly at the end is legal (off-by-one), one byte past is not.
+    const exact = try liftString(cx, testing.allocator, 0, @intCast(mem.len));
+    testing.allocator.free(exact);
+    try testing.expectError(StringError.OutOfBounds, liftString(cx, testing.allocator, 1, @intCast(mem.len)));
+
+    // The same matrix through the other encodings, where the length is scaled:
+    // utf16 doubles it (2 * code_units), latin1 does not.
+    var cx16 = cx;
+    cx16.string_encoding = .latin1_utf16;
+    try testing.expectError(StringError.OutOfBounds, liftString(cx16, testing.allocator, 0xFFFF_FFF0, UTF16_TAG | 0x10));
+    try testing.expectError(StringError.StringTooLong, liftString(cx16, testing.allocator, 0, UTF16_TAG | 0xFFFF_FFFF));
+    try testing.expectError(StringError.OutOfBounds, liftString(cx16, testing.allocator, 1, UTF16_TAG | 2)); // odd pointer
+    try testing.expectError(StringError.OutOfBounds, liftString(cx16, testing.allocator, 0xFFFF_FFF0, 0x40)); // latin1
+    try testing.expectError(StringError.StringTooLong, liftString(cx16, testing.allocator, 0, MAX_STRING_BYTE_LENGTH + 1));
+
+    // A legal string still lifts, so nothing above wedged the context.
+    const ok = try liftString(cx, testing.allocator, 0, 8);
+    defer testing.allocator.free(ok);
+    try testing.expectEqualStrings("AAAAAAAA", ok);
+}

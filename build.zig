@@ -8,7 +8,7 @@ const zon = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
+    const optimize = b.standardOptimizeOption(.{}); // dev.357: non-optional again (p1 shrinks)
 
     // ROADMAP §4.6 — coarse, orthogonal feature flags.
     //   -Dwasm     : Wasm spec level (3.0 default)
