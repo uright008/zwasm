@@ -28,6 +28,7 @@
 | p8b | `safety: guest lengths and guest addresses are checked, so overflow traps` | `listBytes`/`listBytesOf`/`guestPtr` 三个咽喉点：guest 长度 × 元素大小、guest 基址 + 偏移。溢出 → `OutOfBoundsStore`/`OutOfBoundsLoad`（上游 #535 刻意保留为内存 trap，不折成 Unreachable）。替换 **8 处 size 乘法 + 7 处指针推导**；指针那批即使尺寸已 checked 也必须查（环绕到低地址会静默读写错地方） | 上游同类问题存在（未修） | **可上游化**（通用安全修复） |
 | p8c | `test: join the closer thread once (the CI runner caught the double join)` | 测试里 `defer join` + 显式 join 的双重 join：本地侥幸通过、CI runner ABRT。已全局扫描确认树内无第二处 | — | 随 p8a 一起上游化 |
 | p9 | `fix(wasi): a trailing .. in remove-directory answers notempty on every host` | `path_remove_directory` 对尾随 `..` **词法**答 `.notempty`（不再落到 syscall）：`X/..` 解析出的目录必然包含 `X`，所以永不为空；Linux 返回 ENOTEMPTY、**macOS 返回 EINVAL**（实测 `rmdir("a/..")` → EINVAL 22，`std.Io` 会把它变成 debug panic，fork 原本映射成 `.io`）。`DottedFinal` 增加 `dotdot_only` | 上游同测试同样在 macOS 失败（无 OS 门控） | **可上游化**（跨平台 errno 一致性） |
+| p10 | `fs: kernel-enforced containment for preopens`（**待实现**） | 把 `resolve()` 从「词法检查 + 返回相对路径串」改成「**逐组件 `openat(O_NOFOLLOW\|O_DIRECTORY)` 走链**，返回已核验的父目录 fd + 单叶名字」；符号链接组件一律拒（`notcapable`）。关键性质：**全组件禁符号链接后，词法的 `..` 计数与真实深度一致** → 等于内核级包含，不需要 `openat2`（后者只作 Linux 快路）。另加 `PreopenEntry.read_only` 与软配额 | **不上游（用户决定）** | **fork 专属**：优先满足我们自己的严格性，不为上游评审裁剪；但**仍要 rebase 友好**（新文件 `path_walk.zig`，对上游文件改动集中在 11 处 `resolve()` 调用点） |
 | p7 | `port: rebase onto upstream main (8 commits) and keep D-445 at the new choke point` | rebase 后上游新代码的 0.18 差异 4 处：① `errdefer \|err\|`（0.18 无捕获式）→ `run` 拆成包装 + `catch \|err\|`；② `@typeInfo(E).error_set` 非可选且不可迭代 → `error_names.?`；③④ `@typeInfo(P).pointer.alignment` → `pointer.attrs.@"align"`。另把 D-445 窄化搬到 `hostFnError`（上游新咽喉点），名单抽成 `Instance.isGuestFault` | 上游仍在 0.16 | 上游迁 0.18 后整条删除；分歧随上游 #535/PR #549 合并而消解 |
 | p6f | `feat(cli): say which import a component was refused for` | `zwasm run` 在 `UnsupportedWasiImport` 时追加诊断（接口#函数 + 代）；实测服务端面 `wasi:http/types#[method]incoming-request.consume` 被明确报出 | 通用改进 | 可上游化 |
 | p6e | `feat(http): transport failures carry their real error-code` | `handle` 的传输失败不再一律 `internal-error`：`errorCodeFor` 映射到规范错误码（connection-timeout / connection-refused / connection-terminated / destination-unavailable / DNS-error / TLS-protocol-error / TLS-certificate-error / HTTP-protocol-error，catch-all 仍 internal-error）；序号取 0.2.12 声明序。**遗留**：body 读失败仍以调用失败结束，未走 `stream-error::last-operation-failed`（需要 error 资源） | 上游 p2 http 尚缺 | 可上游化 |
@@ -79,6 +80,10 @@ Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写�
 **怎么取载荷**：`git show <commit> -- <file>`；在上游 0.16 检出上按同样语义重写，**不要直接
 `git apply`**（0.18 移植的语法改动会冲突：`errdefer |err|`、`error_set.error_names`、
 `pointer.attrs.@"align"`、`std.Io` 操作模型等）。
+
+**不上游的**：`p7`（snooze 专属语义）、`p10`（fs 内核级包含，用户 2026-10-18 决定留在 fork）。
+判断标准：如果一条改动是**我们的严格性选择**（而非上游缺的能力），留在 fork；上游若哪天自己做了等价物，
+我们按新形状重写或直接删掉自己的。
 
 **同步节奏建议**：每次上游 rebase 后回头核对本表 —— 上游修掉的候选（如 #519）立即从表中删除，
 并删掉 fork 里对应的那部分（`p3` 的前半就是这么消失的）。
