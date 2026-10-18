@@ -27,6 +27,7 @@
 | p8a | `feat(host): expose the interrupt and generalize host-IO cancellation` | `Opened.interrupt()` 跨线程停住 guest 调用（解释器每 1024 步轮询中断位 → `error.Interrupted`，`ComponentInstance`/`BuiltComponent` 两种形态都覆盖）；Host 的取消注册表单槽 → `(target, callback)` 列表 + `cancelHostIo()`（`registerHttpCancel`/`cancelHttp` 保留别名；锁跨回调，因为上游测试钉住「unregister 不能在 canceller 还可能用着目标时返回」）；`wasi:clocks` 等待改 20ms 切片 + 让位 `isClosing()`，`Host.clocks_wait_max_ns` 可选硬上限 | 上游无（机制通用；snooze 用它做每插件 deadline） | **可上游化**（通用机制） |
 | p8b | `safety: guest lengths and guest addresses are checked, so overflow traps` | `listBytes`/`listBytesOf`/`guestPtr` 三个咽喉点：guest 长度 × 元素大小、guest 基址 + 偏移。溢出 → `OutOfBoundsStore`/`OutOfBoundsLoad`（上游 #535 刻意保留为内存 trap，不折成 Unreachable）。替换 **8 处 size 乘法 + 7 处指针推导**；指针那批即使尺寸已 checked 也必须查（环绕到低地址会静默读写错地方） | 上游同类问题存在（未修） | **可上游化**（通用安全修复） |
 | p8c | `test: join the closer thread once (the CI runner caught the double join)` | 测试里 `defer join` + 显式 join 的双重 join：本地侥幸通过、CI runner ABRT。已全局扫描确认树内无第二处 | — | 随 p8a 一起上游化 |
+| p9 | `fix(wasi): a trailing .. in remove-directory answers notempty on every host` | `path_remove_directory` 对尾随 `..` **词法**答 `.notempty`（不再落到 syscall）：`X/..` 解析出的目录必然包含 `X`，所以永不为空；Linux 返回 ENOTEMPTY、**macOS 返回 EINVAL**（实测 `rmdir("a/..")` → EINVAL 22，`std.Io` 会把它变成 debug panic，fork 原本映射成 `.io`）。`DottedFinal` 增加 `dotdot_only` | 上游同测试同样在 macOS 失败（无 OS 门控） | **可上游化**（跨平台 errno 一致性） |
 | p7 | `port: rebase onto upstream main (8 commits) and keep D-445 at the new choke point` | rebase 后上游新代码的 0.18 差异 4 处：① `errdefer \|err\|`（0.18 无捕获式）→ `run` 拆成包装 + `catch \|err\|`；② `@typeInfo(E).error_set` 非可选且不可迭代 → `error_names.?`；③④ `@typeInfo(P).pointer.alignment` → `pointer.attrs.@"align"`。另把 D-445 窄化搬到 `hostFnError`（上游新咽喉点），名单抽成 `Instance.isGuestFault` | 上游仍在 0.16 | 上游迁 0.18 后整条删除；分歧随上游 #535/PR #549 合并而消解 |
 | p6f | `feat(cli): say which import a component was refused for` | `zwasm run` 在 `UnsupportedWasiImport` 时追加诊断（接口#函数 + 代）；实测服务端面 `wasi:http/types#[method]incoming-request.consume` 被明确报出 | 通用改进 | 可上游化 |
 | p6e | `feat(http): transport failures carry their real error-code` | `handle` 的传输失败不再一律 `internal-error`：`errorCodeFor` 映射到规范错误码（connection-timeout / connection-refused / connection-terminated / destination-unavailable / DNS-error / TLS-protocol-error / TLS-certificate-error / HTTP-protocol-error，catch-all 仍 internal-error）；序号取 0.2.12 声明序。**遗留**：body 读失败仍以调用失败结束，未走 `stream-error::last-operation-failed`（需要 error 资源） | 上游 p2 http 尚缺 | 可上游化 |
@@ -182,9 +183,10 @@ aarch64-macos + wasm-tools 1.262.0，`~/zwork/fork` @ `4d5d4eb`）。**spec 语�
    `SafeAllocator.captureStackTrace` → `SelfInfo.MachO.unwindFrameInner` 里 `switch on corrupt
    value`，随后 panic 路径死锁（`MachO.findModule` → `Io.Mutex.lock`）。Debug 下测试分配器每次
    free 都抓栈，必踩。**用 `-Doptimize=ReleaseSafe` 绕过**（3419/3432 passed）。值得报给 zig。
-2. **上游测试的 Linux 假设**：`wasi.path.test.path_remove_directory` 的 `a/..` 用例期望
-   `ENOTEMPTY`，而 **macOS 实测 `rmdir("a/..")` 返回 EINVAL**（直接验过）。该测试是上游的、无 OS
-   门控，fork 从未改过 `src/wasi/path.zig`。处理方式待定（OS 门控 / 映射对齐 / 报上游）。
+2. **上游测试的 Linux 假设 → 已修（`p9`）**：`path_remove_directory` 的 `a/..` 用例期望
+   `ENOTEMPTY`，而 macOS 实测 `rmdir("a/..")` 返回 **EINVAL**（直接验过；该测试是上游的、无 OS 门控）。
+   修法是**词法**答 `.notempty`（`X/..` 必然非空），不落 syscall —— 修完 **macOS ReleaseSafe
+   22/22 steps、3413/3425 passed、0 failed**。
 
 复现：`~/zwork/run-rs.sh`（ReleaseSafe 单元套件）、`~/zwork/run-spec.sh`（spec 语料）。
 
