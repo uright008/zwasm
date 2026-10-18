@@ -36,9 +36,13 @@ pub const Walked = struct {
     /// named the directory itself (e.g. `"a/b/.."`), which every caller already
     /// handles as "the directory".
     name: []const u8,
-    /// Whether `parent` is a directory this walk opened (and the caller must
-    /// close) or the borrowed `root` (which the caller must NOT close).
-    owns_parent: bool,
+
+    /// The walk always owns `parent`, even when the path named a single
+    /// component (it opens `.` on the root rather than borrowing it). That is
+    /// one rule to remember instead of a flag: every caller closes.
+    pub fn close(self: Walked, io: std.Io) void {
+        self.parent.close(io);
+    }
 };
 
 pub const Error = error{
@@ -70,9 +74,9 @@ pub fn walk(io: std.Io, root: std.Io.Dir, path: []const u8) Error!Walked {
         return Error.Invalid;
     if (std.mem.findScalar(u8, path, 0) != null) return Error.Invalid;
 
-    var current = root;
-    var owned = false; // whether `current` is ours to close
-    errdefer if (owned) current.close(io);
+    // Open the root itself first, so `parent` is always ours to close.
+    var current = root.openDir(io, ".", .{ .iterate = true }) catch |err| return map(err);
+    errdefer current.close(io);
 
     var depth: usize = 0;
     var it = std.mem.tokenizeAny(u8, path, separators);
@@ -86,15 +90,14 @@ pub fn walk(io: std.Io, root: std.Io.Dir, path: []const u8) Error!Walked {
             // no-follow flag; it still cannot leave the root, because the depth
             // it descends was built from real (symlink-free) components.
             const up = current.openDir(io, "..", .{ .iterate = true }) catch |err| return map(err);
-            if (owned) current.close(io);
+            current.close(io);
             current = up;
-            owned = true;
             name = ".";
             continue;
         }
         if (it.peek() == null) {
             // The last component is the leaf: the caller operates on it.
-            return .{ .parent = current, .name = seg, .owns_parent = owned };
+            return .{ .parent = current, .name = seg };
         }
         const next = current.openDir(io, seg, .{ .follow_symlinks = false, .iterate = true }) catch |err| {
             // `ELOOP` is what the kernel answers for a symlink component with
@@ -102,13 +105,12 @@ pub fn walk(io: std.Io, root: std.Io.Dir, path: []const u8) Error!Walked {
             if (err == error.SymLinkLoop or err == error.NotDir) return Error.Escape;
             return map(err);
         };
-        if (owned) current.close(io);
+        current.close(io);
         current = next;
-        owned = true;
         depth += 1;
         name = ".";
     }
-    return .{ .parent = current, .name = name, .owns_parent = owned };
+    return .{ .parent = current, .name = name };
 }
 
 fn map(err: anyerror) Error {
@@ -193,6 +195,7 @@ test "walk refuses a symlink component, and stays inside for real ones" {
     // A real component walks, and the leaf comes back by name.
     {
         const w = try walk(io, root, "sub/file.txt");
+        defer w.close(io);
         try testing.expectEqualStrings("file.txt", w.name);
         const st = try w.parent.statFile(io, w.name, .{});
         try testing.expectEqual(@as(u64, 6), st.size);
@@ -200,6 +203,7 @@ test "walk refuses a symlink component, and stays inside for real ones" {
     // `..` that stays inside is fine; the leaf is the directory.
     {
         const w = try walk(io, root, "sub/..");
+        defer w.close(io);
         try testing.expectEqualStrings(".", w.name);
     }
     // A symlink as an INTERMEDIATE component is refused, however it is spelled:
@@ -210,6 +214,7 @@ test "walk refuses a symlink component, and stays inside for real ones" {
     // leaf is the caller's responsibility (see `statLeaf` / `openLeaf`).
     {
         const w = try walk(io, root, "link");
+        defer w.close(io);
         try testing.expectEqualStrings("link", w.name);
         try testing.expectEqual(@as(?std.Io.File.Stat, null), try statLeaf(io, w.parent, w.name));
     }

@@ -10,6 +10,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const path_walk = @import("path_walk.zig");
 const p1 = @import("preview1.zig");
 const host_mod = @import("host.zig");
 
@@ -171,7 +172,23 @@ pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p
     return if (st.kind == .directory) .isdir else .notdir;
 }
 
-const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
+/// A resolved guest path: the leaf's parent directory (kernel-verified by
+/// `path_walk.walk`, which refuses symlink components) plus the leaf name.
+/// `parent` is always owned, so every caller closes it with `deinit`.
+const Resolved = struct {
+    parent: std.Io.Dir,
+    /// The leaf to operate on: one component, symlink-free by construction.
+    name: []const u8,
+    /// The path exactly as the guest spelled it. The lexical rules (dotted final
+    /// components, symlink targets) must read THIS, not `name`: the walk
+    /// normalizes `a/..` to the leaf `.`, and judging the normalized form would
+    /// answer the wrong errno for the guest's spelling.
+    guest: []const u8,
+
+    fn deinit(self: Resolved, io: std.Io) void {
+        self.parent.close(io);
+    }
+};
 
 /// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
 /// and check that `needed` — the right the witx doc comment names for the
@@ -188,8 +205,27 @@ fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: 
     if (slot.kind != .dir) return .notdir;
     if (!slot.has(needed)) return .notcapable;
     const handle = slot.host_handle orelse return .notdir;
-    out.* = .{ .dir = .{ .handle = handle }, .sub = path };
+    const io = host.io orelse return .nosys;
+    // `confine()` is the lexical rule; the walk is the part the kernel enforces:
+    // every intermediate component is opened with symlinks refused, so a symlink
+    // component cannot redirect the resolution outside the preopen.
+    const walked = path_walk.walk(io, .{ .handle = handle }, path) catch |err| return walkErrno(err);
+    out.* = .{ .parent = walked.parent, .name = walked.name, .guest = path };
     return .success;
+}
+
+/// `path_walk`'s refusals in WASI errno terms. `confine()` already answers the
+/// absolute/drive/NUL cases, so `Invalid` here is defensive.
+fn walkErrno(err: path_walk.Error) p1.Errno {
+    return switch (err) {
+        error.Invalid, error.Escape => .notcapable,
+        error.NotFound => .noent,
+        error.NotDir => .notdir,
+        error.AccessDenied => .acces,
+        error.NameTooLong => .nametoolong,
+        error.OutOfMemory => .nomem,
+        error.Unexpected => .io,
+    };
 }
 
 /// Map a `std.Io.Dir`/`File` filesystem error to a WASI errno. The arms cover
@@ -227,7 +263,8 @@ pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_CREATE_DIRECTORY, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
-    r.dir.createDir(io, r.sub, std.Io.File.Permissions.default_dir) catch |err| return mapDirErr(err);
+    defer r.deinit(io);
+    r.parent.createDir(io, r.name, std.Io.File.Permissions.default_dir) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -238,17 +275,18 @@ pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
+    defer r.deinit(io);
     // rmdir on a path whose last component is `.` is EINVAL per POSIX; guarded
     // because std.Io panics on that errno in debug builds (see the helper).
-    if (endsInDotComponent(r.sub)) return .inval;
+    if (endsInDotComponent(r.guest)) return .inval;
     // A trailing `..` resolves to a directory that necessarily contains the
     // component it came from, so the removal can never succeed: Linux answers
     // ENOTEMPTY, macOS answers EINVAL (measured: `rmdir("a/..")` → EINVAL 22,
     // which `std.Io` turns into a debug panic and this fork would have mapped
     // to `.io`). Answering lexically gives every guest the same errno on every
     // host, and never reaches the syscall that disagrees.
-    if (finalComponentIs(r.sub, .dotdot_only)) return .notempty;
-    r.dir.deleteDir(io, r.sub) catch |err| return mapDirErr(err);
+    if (finalComponentIs(r.guest, .dotdot_only)) return .notempty;
+    r.parent.deleteDir(io, r.name) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -267,14 +305,16 @@ pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, 
     const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
+    defer ro.deinit(io);
+    defer rn.deinit(io);
     // POSIX makes `rename` EINVAL when either side's final component is `.` or
     // `..`, and `std.Io` turns EINVAL into a debug panic. Linux hides this by
     // answering EBUSY; macOS and Windows do not — measured, both abort the
     // runtime from a guest calling `path_rename("a/.", …)` (#265). Answering
     // `inval` here gives all three the errno POSIX names.
-    if (finalComponentIs(ro.sub, .dot_or_dotdot) or
-        finalComponentIs(rn.sub, .dot_or_dotdot)) return .inval;
-    ro.dir.rename(ro.sub, rn.dir, rn.sub, io) catch |err| return mapDirErr(err);
+    if (finalComponentIs(ro.guest, .dot_or_dotdot) or
+        finalComponentIs(rn.guest, .dot_or_dotdot)) return .inval;
+    ro.parent.rename(ro.name, rn.parent, rn.name, io) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -289,9 +329,11 @@ pub fn pathLink(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_flags: u32, 
     const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_LINK_TARGET, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
+    defer ro.deinit(io);
+    defer rn.deinit(io);
     const follow = old_flags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0;
-    if (builtin.os.tag == .windows) return winPathLink(ro.dir, ro.sub, rn.dir, rn.sub, follow);
-    ro.dir.hardLink(ro.sub, rn.dir, rn.sub, io, .{
+    if (builtin.os.tag == .windows) return winPathLink(ro.parent, ro.name, rn.parent, rn.name, follow);
+    ro.parent.hardLink(ro.name, rn.parent, rn.name, io, .{
         .follow_symlinks = follow,
     }) catch |err| return mapDirErr(err);
     return .success;
@@ -418,9 +460,10 @@ pub fn pathSymlink(host: *Host, mem: []const u8, target_ptr: u32, target_len: u3
     var r: Resolved = undefined;
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_SYMLINK, &r);
     if (e != .success) return e;
-    if (symlinkTargetEscapes(r.sub, target)) return .notcapable;
     const io = host.io orelse return .nosys;
-    r.dir.symLink(io, target, r.sub, .{}) catch |err| return mapDirErr(err);
+    defer r.deinit(io);
+    if (symlinkTargetEscapes(r.guest, target)) return .notcapable;
+    r.parent.symLink(io, target, r.name, .{}) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -438,7 +481,8 @@ pub fn pathReadlink(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_le
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_READLINK, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
-    const n = r.dir.readLink(io, r.sub, buf) catch |err| return mapDirErr(err);
+    defer r.deinit(io);
+    const n = r.parent.readLink(io, r.name, buf) catch |err| return mapDirErr(err);
     std.mem.writeInt(u32, mem[bufused_ptr..][0..4], @intCast(n), .little);
     return .success;
 }
@@ -477,7 +521,8 @@ pub fn pathFilestatGet(host: *Host, mem: []u8, dirfd: p1.Fd, lookupflags: u32, p
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_GET, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
-    const st = r.dir.statFile(io, r.sub, .{ .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 }) catch |err| return mapDirErr(err);
+    defer r.deinit(io);
+    const st = r.parent.statFile(io, r.name, .{ .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 }) catch |err| return mapDirErr(err);
     const atim_ns: i96 = if (st.atime) |a| a.nanoseconds else st.mtime.nanoseconds;
     const fs: p1.Filestat = .{
         .dev = 0,
@@ -503,23 +548,24 @@ pub fn pathFilestatSetTimes(host: *Host, mem: []const u8, dirfd: p1.Fd, lookupfl
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_SET_TIMES, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
+    defer r.deinit(io);
     const atime = setTimestampOf(fst_flags, p1.FSTFLAGS_ATIM_NOW, p1.FSTFLAGS_ATIM, atim);
     const mtime = setTimestampOf(fst_flags, p1.FSTFLAGS_MTIM_NOW, p1.FSTFLAGS_MTIM, mtim);
     // Pre-probe existence: Threaded's setTimestamps op treats ENOENT as an
     // UNEXPECTED errno (posix.unexpectedErrno → error.Unexpected → `.io`),
     // losing the `noent` the guest is owed for a missing path.
-    r.dir.access(io, r.sub, .{}) catch |err| return mapDirErr(err);
+    r.parent.access(io, r.name, .{}) catch |err| return mapDirErr(err);
     if (comptime builtin.os.tag == .windows) {
         // Zig 0.16 std has NO `dirSetTimestamps` on Windows (`@panic("TODO")`)
         // — it would crash the runtime. Open the file and use the
         // cross-platform `File.setTimestamps` (verified on Win64 via
         // `fd_filestat_set_times`); the symlink-follow nuance is lost on this
         // path (openFile follows by default).
-        var file = r.dir.openFile(io, r.sub, .{ .mode = .read_write }) catch |err| return mapDirErr(err);
+        var file = r.parent.openFile(io, r.name, .{ .mode = .read_write }) catch |err| return mapDirErr(err);
         defer file.close(io);
         file.setTimestamps(io, .{ .access_timestamp = atime, .modify_timestamp = mtime }) catch |err| return mapDirErr(err);
     } else {
-        r.dir.setTimestamps(io, r.sub, .{
+        r.parent.setTimestamps(io, r.name, .{
             .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0,
             .access_timestamp = atime,
             .modify_timestamp = mtime,
