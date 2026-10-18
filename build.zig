@@ -8,7 +8,17 @@ const zon = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{}); // dev.357: non-optional again (p1 shrinks)
+    // `b.standardOptimizeOption(.{})` returns `?Optimize` in most 0.18 dev builds
+    // and `Optimize` in dev.357+, where it moved back to non-optional. The port
+    // gate resolves the current master at run time (dev builds get pruned), and
+    // the local toolchain is not necessarily that build, so accept EITHER shape
+    // instead of tracking one and breaking the other. This is why the gate went
+    // red on a tree that was green locally.
+    const optimize_opt = b.standardOptimizeOption(.{});
+    const optimize = if (@typeInfo(@TypeOf(optimize_opt)) == .optional)
+        optimize_opt orelse .Debug
+    else
+        optimize_opt;
 
     // ROADMAP §4.6 — coarse, orthogonal feature flags.
     //   -Dwasm     : Wasm spec level (3.0 default)
