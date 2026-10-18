@@ -102,7 +102,11 @@ Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写�
 
 **不上游的**：`p7`（snooze 专属语义）、`p10`（fs 内核级包含，用户 2026-10-18 决定留在 fork）。
 `p10` 进度：**step A**（`path_walk.zig`：走链 + 叶子助手 + 单测）、**step B**（`resolve()` 与 `fd.zig:pathOpen` 接线、
-三处叶子跟随堵住、端到端逃逸测试红/绿已验）**完成**；**step C**（`PreopenEntry.read_only` + 软配额）待做。
+三处叶子跟随堵住、端到端逃逸测试红/绿已验）、**step C-1**（`addPreopenWith(..., .{ .read_only = true })`：权位表里抹掉
+`WRITE_RIGHTS`，只读 preopen 的每个写操作由既有的 `has(needed)` 自然拒为 `notcapable`，测试同时验证同一操作在读写
+preopen 上成功）**完成**；**step C-2**（写入计量软配额）待做。
+snooze 侧配套（不在本表，属接入层）：`catalog.FsGrant`/`preopensFor` —— grant 默认关闭，开启时**唯一合法目标是插件
+自己的目录**，且 plugin id 按敌意输入校验（`..`/分隔符/绝对路径/盘符/前导点/内嵌 NUL 一律拒绝而非净化）。
 判断标准：如果一条改动是**我们的严格性选择**（而非上游缺的能力），留在 fork；上游若哪天自己做了等价物，
 我们按新形状重写或直接删掉自己的。
 
