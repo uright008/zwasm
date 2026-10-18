@@ -32,6 +32,7 @@ const std = @import("std");
 
 const p1 = @import("preview1.zig");
 const host_mod = @import("host.zig");
+const path_walk = @import("path_walk.zig");
 const path_mod = @import("path.zig");
 const dbg = @import("../support/dbg.zig");
 
@@ -1034,6 +1035,14 @@ pub fn pathOpen(
     fdflags: p1.Fdflags,
     opened_fd_ptr: u32,
 ) p1.Errno {
+    // `dirflags` bit 0 (LOOKUP_SYMLINK_FOLLOW) is accepted and IGNORED. The fork
+    // refuses symlinks outright - every intermediate component is opened with
+    // symlinks off by `path_walk.walk`, and the leaf with O_NOFOLLOW - so there
+    // is nothing to follow. Following a link that stays inside the preopen would
+    // be the spec's behaviour; refusing is this fork's stricter rule, and it is
+    // what closes the escape (PATCHES.md p10).
+    _ = dirflags;
+
     // Bounds-check the path slice.
     const path_end = @as(usize, path_ptr) + @as(usize, path_len);
     if (path_end > mem.len) return .fault;
@@ -1060,44 +1069,18 @@ pub fn pathOpen(
     // callers must thread one onto the Host before calling.
     const io = host.io orelse return .nosys;
 
-    const dir: std.Io.Dir = .{ .handle = dir_handle };
-
-    // `dirflags` bit 0 is LOOKUP_SYMLINK_FOLLOW, and it governs the FINAL path
-    // component only — every earlier one is followed either way, which is what
-    // a no-follow `statFile` measures.
-    //
-    // Stat-then-refuse, NOT `std.Io.Dir`'s own `follow_symlinks`, and that is
-    // deliberate. On Windows `follow_symlinks = false` does not merely add
-    // OPEN_REPARSE_POINT: `dirOpenFileWtf16` also flips the handle from
-    // SYNCHRONOUS_NONALERT to ASYNCHRONOUS, and the next `readPositional` on
-    // it reaches `.PENDING => unreachable` inside std. (`openDir`'s Windows
-    // path does not flip the mode, but one mechanism for all three opens beats
-    // two that differ by OS.)
-    //
-    // The cost is a window: the name could become a symlink between the stat
-    // and the open, and that open would follow it. Narrower than the
-    // follow-time gap D-315 already tracks. Revisit if std stops coupling the
-    // reparse flag to the IO mode.
-    // O_CREAT|O_EXCL is the exception: POSIX makes an EXISTING symlink `exist`
-    // there whatever the follow bit says — O_EXCL outranks the nofollow refusal
-    // — and `createFile(.exclusive = true)` already answers exactly that. This
-    // check stands aside rather than shadowing it with `loop`.
-    const excl_create = (oflags & (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL)) ==
-        (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL);
-    if (dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW == 0 and !excl_create) {
-        if (dir.statFile(io, path, .{ .follow_symlinks = false })) |st| {
-            if (st.kind == .sym_link) return .loop;
-        } else |_| {
-            // Stat failed: nothing here to refuse. Let the open answer — a
-            // fresh name still gets created, a real error still surfaces.
-        }
-    }
+    // Every intermediate component is opened with symlinks refused, so the
+    // parent below is a directory the kernel verified to be inside the preopen:
+    // a symlink COMPONENT can no longer redirect the resolution outside it.
+    const preopen: std.Io.Dir = .{ .handle = dir_handle };
+    const walked = path_walk.walk(io, preopen, path) catch |err| return path_mod.walkErrno(err);
+    defer walked.close(io);
 
     // OFLAGS_DIRECTORY — open a sub-DIRECTORY (`fd_readdir` / further
     // `path_*` calls resolve against it). The new slot mirrors a preopen's
     // `.dir` shape so the descendant fd composes with every dir-taking op.
     if ((oflags & p1.OFLAGS_DIRECTORY) != 0)
-        return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write);
+        return openDirSlot(host, io, walked.parent, dir_slot, walked.name, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write);
 
     // WASI `oflags` select create/trunc/excl; `fs_rights_base` selects the
     // access mode. O_CREAT → createFile (a `std::fs::File::create` guest);
@@ -1113,28 +1096,25 @@ pub fn pathOpen(
     // `truncation_rights` was red; wasmtime 47.0.3 answers `acces` too
     // (measured on a 0444 file).
     const needs_writable_handle = wants_write or (oflags & p1.OFLAGS_TRUNC) != 0;
-    const file = if ((oflags & p1.OFLAGS_CREAT) != 0)
-        dir.createFile(io, path, .{
-            .read = true,
-            .truncate = (oflags & p1.OFLAGS_TRUNC) != 0,
-            .exclusive = (oflags & p1.OFLAGS_EXCL) != 0,
-        }) catch |err| return mapOpenError(err)
-    else blk: {
-        const f = dir.openFile(io, path, .{ .mode = if (needs_writable_handle) .read_write else .read_only }) catch |err| {
+    const file = path_walk.openLeaf(io, walked.parent, walked.name, .{
+        .mode = if (needs_writable_handle) .read_write else .read_only,
+        .create = (oflags & p1.OFLAGS_CREAT) != 0,
+        .truncate = (oflags & p1.OFLAGS_TRUNC) != 0,
+        .exclusive = (oflags & p1.OFLAGS_EXCL) != 0,
+    }) catch |err| switch (err) {
+        // A symlink leaf is ELOOP under O_NOFOLLOW, and `mapOpenError` answers
+        // `.loop` - the same errno the stat-then-refuse this replaces answered.
+        error.IsDir => {
             // POSIX-style guests (Go's os.Open before ReadDir) open a
-            // directory read-only WITHOUT OFLAGS_DIRECTORY; mirror the
-            // kernel by falling back to a directory open. wasmtime answers
-            // `isdir` here instead, but only the OFLAGS_DIRECTORY form is
-            // pinned by the official corpus, and this fallback is load-bearing
-            // for real guests.
-            if (err == error.IsDir)
-                return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .allow_write);
-            return mapOpenError(err);
-        };
-        // O_TRUNC without O_CREAT (a bare truncate-open; the 0.3 `truncate`
-        // open-flag arrives standalone).
-        if ((oflags & p1.OFLAGS_TRUNC) != 0) f.setLength(io, 0) catch |err| return mapSetLengthError(err);
-        break :blk f;
+            // directory read-only WITHOUT OFLAGS_DIRECTORY; mirror the kernel
+            // by falling back to a directory open. wasmtime answers `isdir`
+            // here instead, but only the OFLAGS_DIRECTORY form is pinned by the
+            // official corpus, and this fallback is load-bearing for real
+            // guests.
+            if ((oflags & p1.OFLAGS_CREAT) != 0) return mapOpenError(error.IsDir);
+            return openDirSlot(host, io, walked.parent, dir_slot, walked.name, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .allow_write);
+        },
+        else => return mapOpenError(err),
     };
 
     // Reserve the new fd_table slot.
@@ -1175,7 +1155,7 @@ fn openDirSlot(
     opened_fd_ptr: u32,
     policy: WriteRightPolicy,
 ) p1.Errno {
-    const sub = dir.openDir(io, path, .{ .iterate = true }) catch |err| return mapOpenError(err);
+    const sub = dir.openDir(io, path, .{ .iterate = true, .follow_symlinks = false }) catch |err| return mapOpenError(err);
     // A directory cannot be opened for writing, and preview1 says so through
     // the requested rights rather than a mode flag. The check has to come
     // AFTER the open: a missing path is `noent` and a regular file is its own

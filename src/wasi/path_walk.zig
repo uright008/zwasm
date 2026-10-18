@@ -124,6 +124,18 @@ fn map(err: anyerror) Error {
     };
 }
 
+/// How the leaf should be opened. Every flag reaches the kernel, so a symlink
+/// leaf is refused by `O_NOFOLLOW` rather than by a check that could be raced.
+pub const LeafOptions = struct {
+    mode: std.Io.Dir.OpenFileOptions.Mode = .read_only,
+    create: bool = false,
+    truncate: bool = false,
+    /// `O_CREAT | O_EXCL`: an existing name (symlink or not) is `exist`.
+    exclusive: bool = false,
+    /// `false` answers `IsDir` for a directory leaf, as `Dir.openFile` does.
+    allow_directory: bool = true,
+};
+
 /// Open the leaf WITHOUT following it.
 ///
 /// POSIX gets `O_NOFOLLOW`, so the kernel refuses a symlink leaf instead of
@@ -131,34 +143,44 @@ fn map(err: anyerror) Error {
 /// create the link itself between the two calls, inside its own directory).
 /// Windows has no `openat`, so it falls back to the stat check; the fork's
 /// targets are Linux and macOS.
-pub fn openLeaf(
-    io: std.Io,
-    parent: std.Io.Dir,
-    name: []const u8,
-    mode: std.Io.Dir.OpenFileOptions.Mode,
-    allow_directory: bool,
-) Error!std.Io.File {
+pub fn openLeaf(io: std.Io, parent: std.Io.Dir, name: []const u8, opts: LeafOptions) anyerror!std.Io.File {
     if (builtin.os.tag == .windows) {
-        if (try statLeaf(io, parent, name)) |st| {
-            if (st.kind == .sym_link) return Error.Escape;
+        if (statLeaf(io, parent, name) catch null) |st| {
+            if (st.kind == .sym_link) return error.SymLinkLoop;
         }
-        return parent.openFile(io, name, .{ .mode = mode, .allow_directory = allow_directory }) catch |err| return map(err);
+        return parent.openFile(io, name, .{
+            .mode = opts.mode,
+            .allow_directory = opts.allow_directory,
+        });
     }
     const flags: std.posix.O = .{
-        .ACCMODE = switch (mode) {
+        .ACCMODE = switch (opts.mode) {
             .read_only => .RDONLY,
             .write_only => .WRONLY,
             .read_write => .RDWR,
         },
         .NOFOLLOW = true,
         .CLOEXEC = true,
-        .DIRECTORY = allow_directory and false, // directories are opened by the caller's dir path
+        .CREAT = opts.create,
+        .TRUNC = opts.truncate,
+        .EXCL = opts.exclusive,
     };
-    const fd = std.posix.openat(parent.handle, name, flags, 0) catch |err| switch (err) {
-        error.SymLinkLoop => return Error.Escape,
-        else => return map(err),
-    };
-    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    // The raw error goes through: the caller's mapper knows the WASI errno for
+    // every one of them (EEXIST -> exist, ENOSPC -> nospc, ELOOP -> loop, ...),
+    // which a narrow set of ours would flatten.
+    const fd = try std.posix.openat(parent.handle, name, flags, 0o666);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    if (!opts.allow_directory) {
+        const st = file.stat(io) catch |err| {
+            file.close(io);
+            return err;
+        };
+        if (st.kind == .directory) {
+            file.close(io);
+            return error.IsDir;
+        }
+    }
+    return file;
 }
 
 /// `stat` the leaf WITHOUT following it, returning `null` when it is a symlink
@@ -241,14 +263,14 @@ test "openLeaf does not follow a symlink leaf" {
     try root.symLink(io, "../outside.txt", "link", .{});
 
     // A real file opens.
-    const f = try openLeaf(io, root, "real.txt", .read_only, false);
+    const f = try openLeaf(io, root, "real.txt", .{});
     defer f.close(io);
     var buf: [8]u8 = undefined;
     try testing.expectEqual(@as(usize, 6), try f.readPositionalAll(io, &buf, 0));
 
     // The symlink leaf is refused instead of resolving to the file outside.
     if (builtin.os.tag != .windows) {
-        try testing.expectError(Error.Escape, openLeaf(io, root, "link", .read_only, false));
+        try testing.expectError(error.SymLinkLoop, openLeaf(io, root, "link", .{}));
     }
     // And the stat helper reports it as a symlink, so a caller can answer an
     // escape rather than follow it.

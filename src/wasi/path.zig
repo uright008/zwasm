@@ -216,7 +216,14 @@ fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: 
 
 /// `path_walk`'s refusals in WASI errno terms. `confine()` already answers the
 /// absolute/drive/NUL cases, so `Invalid` here is defensive.
-fn walkErrno(err: path_walk.Error) p1.Errno {
+/// The errno for an error that came out of `path_walk.openLeaf` (or any other
+/// call that hands back the filesystem's own error). `mapDirErr` and
+/// `mapOpenError` are the same table; this names the intent at the leaf.
+fn mapOpenErrno(err: anyerror) p1.Errno {
+    return mapDirErr(err);
+}
+
+pub fn walkErrno(err: path_walk.Error) p1.Errno {
     return switch (err) {
         error.Invalid, error.Escape => .notcapable,
         error.NotFound => .noent,
@@ -332,6 +339,12 @@ pub fn pathLink(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_flags: u32, 
     defer ro.deinit(io);
     defer rn.deinit(io);
     const follow = old_flags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0;
+    // AT_SYMLINK_FOLLOW on the SOURCE would hard-link a file from outside the
+    // preopen into it, so a symlink source is refused rather than followed.
+    if (follow) {
+        const maybe = path_walk.statLeaf(io, ro.parent, ro.name) catch |err| return walkErrno(err);
+        if (maybe == null) return .loop;
+    }
     if (builtin.os.tag == .windows) return winPathLink(ro.parent, ro.name, rn.parent, rn.name, follow);
     ro.parent.hardLink(ro.name, rn.parent, rn.name, io, .{
         .follow_symlinks = follow,
@@ -522,7 +535,16 @@ pub fn pathFilestatGet(host: *Host, mem: []u8, dirfd: p1.Fd, lookupflags: u32, p
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     defer r.deinit(io);
-    const st = r.parent.statFile(io, r.name, .{ .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 }) catch |err| return mapDirErr(err);
+    // With LOOKUP_SYMLINK_FOLLOW the guest asks for the link's TARGET, which a
+    // symlink leaf could point outside the preopen. The fork refuses symlinks
+    // instead of resolve-and-recheck, so the follow request reads the leaf
+    // without following and answers `loop` when it is one. Without the flag the
+    // link's own stat is the correct answer, and `follow_symlinks = false` is
+    // exactly that.
+    const st = if (lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0) blk: {
+        const maybe = path_walk.statLeaf(io, r.parent, r.name) catch |err| return walkErrno(err);
+        break :blk maybe orelse return .loop;
+    } else r.parent.statFile(io, r.name, .{ .follow_symlinks = false }) catch |err| return mapDirErr(err);
     const atim_ns: i96 = if (st.atime) |a| a.nanoseconds else st.mtime.nanoseconds;
     const fs: p1.Filestat = .{
         .dev = 0,
@@ -559,9 +581,10 @@ pub fn pathFilestatSetTimes(host: *Host, mem: []const u8, dirfd: p1.Fd, lookupfl
         // Zig 0.16 std has NO `dirSetTimestamps` on Windows (`@panic("TODO")`)
         // — it would crash the runtime. Open the file and use the
         // cross-platform `File.setTimestamps` (verified on Win64 via
-        // `fd_filestat_set_times`); the symlink-follow nuance is lost on this
-        // path (openFile follows by default).
-        var file = r.parent.openFile(io, r.name, .{ .mode = .read_write }) catch |err| return mapDirErr(err);
+        // `fd_filestat_set_times`). The open goes through `openLeaf`, so a
+        // symlink leaf is ELOOP rather than a handle on whatever it points at -
+        // following it would set times outside the preopen.
+        var file = path_walk.openLeaf(io, r.parent, r.name, .{ .mode = .read_write }) catch |err| return mapOpenErrno(err);
         defer file.close(io);
         file.setTimestamps(io, .{ .access_timestamp = atime, .modify_timestamp = mtime }) catch |err| return mapDirErr(err);
     } else {
@@ -1016,4 +1039,60 @@ test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a
     @memset(mem[0..32], 0);
     writeGuestPath(&mem, 0, "f");
     try testing.expectEqual(p1.Errno.success, unlinkFile(&h, &mem, dirfd, 0, 1));
+}
+
+test "path_open: a symlink component cannot leave the preopen (p10)" {
+    // `confine()` is lexical, so before `path_walk` a guest could name
+    // `link/secret.txt` where `link` is a symlink to a DIRECTORY outside the
+    // preopen: the kernel followed it, and a preopen was therefore equivalent to
+    // handing over everything the daemon's uid can reach (the audit's escape).
+    //
+    // The link must point at a directory, not a file: a file target is refused
+    // by ENOTDIR whether or not symlinks are followed, so it would not prove
+    // the walk does anything.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "outside", std.Io.File.Permissions.default_dir);
+    try root.writeFile(testing.io, .{ .sub_path = "outside/secret.txt", .data = "secret" });
+    try root.createDir(testing.io, "inside", std.Io.File.Permissions.default_dir);
+    try root.writeFile(testing.io, .{ .sub_path = "inside/real.txt", .data = "real" });
+    try root.symLink(testing.io, "../outside", "inside/link", .{});
+
+    // The escape is real without the guard: following the link reaches the file
+    // outside the preopen.
+    {
+        const st = try root.statFile(testing.io, "inside/link/secret.txt", .{ .follow_symlinks = true });
+        try testing.expectEqual(@as(u64, 6), st.size);
+    }
+
+    var mem: [128]u8 = @splat(0);
+    const stat_at = 64;
+
+    // A symlink COMPONENT: refused, and the errno says why (not capable).
+    const esc = "inside/link/secret.txt";
+    @memcpy(mem[0..esc.len], esc);
+    try testing.expectEqual(p1.Errno.notcapable, pathFilestatGet(&h, &mem, dirfd, 0, 0, esc.len, stat_at));
+
+    // A symlink LEAF is ELOOP when the guest asks to follow it, and its own
+    // stat when it does not - never the target's, which lives outside.
+    const leaf = "inside/link";
+    @memset(mem[0..32], 0);
+    @memcpy(mem[0..leaf.len], leaf);
+    try testing.expectEqual(p1.Errno.loop, pathFilestatGet(&h, &mem, dirfd, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, leaf.len, stat_at));
+    try testing.expectEqual(p1.Errno.success, pathFilestatGet(&h, &mem, dirfd, 0, 0, leaf.len, stat_at));
+
+    // A real file still stats, and `..` that stays inside still walks.
+    const real = "inside/real.txt";
+    @memset(mem[0..32], 0);
+    @memcpy(mem[0..real.len], real);
+    try testing.expectEqual(p1.Errno.success, pathFilestatGet(&h, &mem, dirfd, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, real.len, stat_at));
+    const up = "inside/../inside/real.txt";
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..up.len], up);
+    try testing.expectEqual(p1.Errno.success, pathFilestatGet(&h, &mem, dirfd, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, up.len, stat_at));
 }
