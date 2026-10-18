@@ -2,7 +2,7 @@
 
 上游：<https://github.com/zwasm/zwasm>
 基线提交：`442f746a63c517d2545697aa174d9394f88086f7`（v2.7.0 之后、`#512` 修复）
-**当前基点：上游 main `af3b0fec1`**（2026-10-17 第二次 rebase；上游 #535 已并入，我们的 D-445 兜底随之删除，见 `p7b`）。
+**当前基点：上游 main `bbd151623`**（2026-10-18 以 **merge** 并入 11 个上游提交；#535 之后上游又自行修了 #495，我们的 p3f 随之删除 —— 见 `p3f` 与「2026-10-18 上游 merge」）。
 工作分支：`zig-0.18-port`（fork remote：`fork` = https://github.com/uright008/zwasm）
 工具链：Zig 0.18-dev。本机与 snooze 的 `minimum_zig_version` 是 `0.18.0-dev.210+3626a240e`，而**该构建已被 ziglang.org 清理**；CI（`.github/workflows/port-gate.yml`）因此运行时解析当前 master，实测在更新的 dev（+43 构建）上同样全绿。
 
@@ -20,7 +20,7 @@
 | p3c | `refactor: use the 0.18 Io idioms for socket reads and writes` | 删 `io_net_compat.zig`；读用 `net.Stream.read(io, bufs)`，写用 `net.Stream.writer(io, buf)` + `writeAll` + `flush` | 同上 | 同上 |
 | p3d | `safety: attribute guest faults to the guest, not to the host binding` | `mapDispatchErr` 按 D-445 约定把 10 个 guest 致因错误窄化为 `error.Unreachable`（单一咽喉点，替代改 59 处调用点）；`HostTrap` 保留为兜底 | 与 #519 同类，可合并进该 issue 的评论 | 上游若实现自己的窄化，删除本条 |
 | p3e | `safety: two reachable aborts become typed errors` | `invokeFlat` 的 arity assert → `error.ArgArityMismatch`；`Table.set` 的 JIT funcref `@panic` → `error.UnsupportedFuncrefMirror` | 可上游（通用） | 上游若修，删除 |
-| p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | `STACK_GUARD_HEADROOM` 全平台统一 1 MiB；两个后端对超出 headroom 的帧 decline（解释器接管） | **#495 仍 open** | 上游若采用别的修法（信号分类/逐页探测），按新形状重写 |
+| p3f | `safety: a large JIT frame traps instead of killing the process (#495)` | ~~`STACK_GUARD_HEADROOM` 统一 1 MiB；两个后端对超 headroom 的帧 decline~~ | **#495 已由上游 `373eceb02` 修**（probe 改成 `LEA RAX,[RSP-frame]` 计入帧 + `LEAF_FRAME_MAX = 8 KiB`） | **已删除**（2026-10-18 merge 按上游取）：`stack_limit.zig` 整文件取上游、两个 emitter 的 prologue decline、`decline_note.frame_bytes`、`cli/run.zig` 的报告分支全部移除 |
 | p4a | `feat(http): stream the response body from the live connection` | `handle` 只做 connect/send/head；body 由 guest 的 `read` 按需从活连接拉，固定 16 KiB transfer 缓冲，**去掉 8 MiB eager 上限**；transfer 单块堆分配（std 的指针自引用） | 上游 p2 http 尚缺 | 可上游化 |
 | ci1 | `ci: a gate for the port branch, on the current Zig 0.18-dev` | 新增 `.github/workflows/port-gate.yml`：运行时从 ziglang.org index 解析**当前** master dev 构建（dev 构建会被官网清理，写死 URL 必烂；`ZIG_VERSION` 可钉），装 wasm-tools，跑 `zig build` + 单元套件 + 核心 spec + 组件模型 spec + wasm 3.0（interp lane）。**首次运行全绿**，且用的是当时的 master dev（比本地 dev.210 新约 43 个构建）——说明移植不只在一个 dev 构建上成立 | 上游 ci.yml 钉 0.16 且只跑 main/PR，从不覆盖本分支 | fork 专属；上游迁 0.18 后可删 |
 | p7b | `port: rebase onto upstream af3b0fec1 (#535 landed) and drop our redundant narrowing` | 第二次 rebase（#535「坏句柄 → Unreachable」已上游化）：注册臂改用上游的 `defineMapped(..., mapGuestFault)`；**删掉我们 `hostFnError` 的兜底窄化**（上游 #535 的测试明确要求未 opt-in 的宿主函数保留 embedder 自己的错误）；`isGuestFault` 仅留给非宿主函数路径。移植点：`mapGuestFault` 的 `error_set.?` → `error_names.?`；我们的 `WasiP2Error.OutOfBounds` → `OutOfBoundsLoad` | 上游已实现 D-445 | 分歧已消解，仅剩 `isGuestFault` 兜底 |
@@ -40,6 +40,21 @@
 | p4c | `feat(http): host-side cancellation, and a per-thread interp stack limit` | 活 transfer 通过 Host 上的原子钩子发布，`Host.cancelHttp()` 可跨线程 shutdown socket，让阻塞的 body 读立刻返回；被取消的传输标记为失败而不是「正常 EOF」；背压在流式模型下天然成立 | 上游 p2 http 尚缺 | 可上游化（含 `native_stack_limit` threadlocal 修复：跨线程调用 guest 曾立即 `CallStackExhausted`） |
 | p4b | `feat(http): host-enforced deadlines for the response head and body reads` | 生效 `request-options` 超时：有效期限 = min(guest, 宿主上限)；宿主上限在 `Host`（`http_head_deadline_ns`/`http_read_deadline_ns`，默认 30s）；头超时映射为 `connection-timeout`；重定向改为不自动跟随 | 同上 | 可上游化 |
 | p4 | `feat(http): wasi:http@0.2.x client support — a real p2 guest does a GET` | 新增 `component_wasi_p2_http.zig`：`wasi:http/types` 的 fields/outgoing-request/request-options/incoming-response/incoming-body/future-incoming-response + `outgoing-handler.handle`；`adapter.Entry.op_p2` 支持同名函数按代选 op；body 走新的 input-stream backing | 上游 p2 http 尚缺（其实现是 p3 优先） | 可上游化（通用能力）；若上游实现 p2 http，删除本条 |
+
+## 2026-10-18 上游 merge（`bbd151623`，11 个提交）
+
+以 **merge**（不是 rebase）并入上游 main。冲突只 3 处，且全是说明文字 ——
+`engine/codegen/x86_64/abi.zig`、`engine/codegen/x86_64/op_simd.zig`、
+`ir/analysis/local_homing.zig` 都是「x86_64 寄存器池 4→8」（#503/#557/#560）后的文档改写，取上游。
+
+- **#495 取上游形状**（见 p3f）：删掉 1 MiB headroom、两个 emitter 的 prologue decline、
+  `decline_note` 的 `frame_bytes` 理由、`cli/run.zig` 的报告分支。
+- **0.18 移植的新增点**（上游新代码带进来的）：`[_]T{…} ** N` → `@as([N]T, @splat(v))`
+  （`arm64/emit_test_local.zig`、`x86_64/emit_test_int.zig`、`x86_64/abi.zig`）；
+  `@typeInfo(E).@"enum".fields.len` → `.field_names.len`（`x86_64/abi.zig`）。
+- **验证（本机，0.18-dev.210）**：`zig build` 通过；`zig build test` — 22/22 steps、
+  3442/3454（12 skipped）、核心套件 3332 pass / 12 skip；8000-locals 大帧递归冒烟在
+  jit 与 interp 均为 `trap kind=stack_overflow`（exit 1），不再是 exit 70。
 
 ## 2026-10-17 review 修复
 
@@ -68,7 +83,7 @@ Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写�
 | 候选 | fork 提交 | 载荷（重写时看这些文件/函数） | 关联上游 |
 | --- | --- | --- | --- |
 | host fn 错误归一化 | `987bbfec8`（部分） | `zwasm/host_func_marshal.zig` 的 `hostFnError`；`zwasm/instance.zig` 的 `mapDispatchErr` | **#519 已由上游 `f45dad90d` 修** |
-| 大帧 JIT decline | `f8183217d` | `platform/stack_limit.zig`（headroom 1 MiB）+ `engine/codegen/{x86_64,arm64}/emit.zig` 的 prologue decline + `codegen/shared/decline_note.zig` | #495（open） |
+| ~~大帧 JIT decline~~ | ~~`f8183217d`~~ | 已作废：上游 `373eceb02` 以另一形状修了 #495，本地已按上游取（2026-10-18 merge） | #495 **已修** |
 | thunk 武装 | `987bbfec8`（后半） | 三个 mixed multi-result thunk + `invokeBufferWrite` 的 `ensureInstalled()` + `stack_limit` | #302（open）→ **上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 已提交**（2026-10-17，按 0.16 重写；等维护者放行 CI）。**合并后删掉 fork 这一半** |
 | 跨线程中断 | `4f8f79605` | `zwasm/instance.zig:interrupt`（上游已有）+ `api/component.zig` 的 `Opened.interrupt`/`ComponentInstance.interrupt` + `api/component_wasi_p2.zig` 的 `BuiltComponent.interrupt` | 新（无 issue） |
 | 泛化宿主 IO 取消 | `4f8f79605` | `wasi/host.zig` 的注册表（`registerHostCancel`/`unregisterHostCancel`/`cancelHostIo`）+ `component_wasi_p2_http.zig` 的注册调用点 | 新（无 issue） |
@@ -99,7 +114,7 @@ fork 里积累（本表的候选不丢，随时可再发）。在 #563 有信号
 
 仍要发的：
 
-1. 评论 [#495](https://github.com/zwasm/zwasm/issues/495)：探针在 `SUB RSP` 之前、处理器不分类栈 fault；四个修法方向请上游选。
+1. ~~评论 [#495](https://github.com/zwasm/zwasm/issues/495)~~ → 上游已自行修复（`373eceb02`：probe 计入帧），无需评论。
 2. ~~评论 [#302](https://github.com/zwasm/zwasm/issues/302)~~ → 已改为 PR [#563](https://github.com/zwasm/zwasm/pull/563)（2026-10-17 提交，等维护者放行 CI）：三个 mixed thunk 与生产路径 `entry_buffer_write.zig` 一并修。
 3. 新 issue / PR：上表里标「新（无 issue）」的通用机制（中断、泛化取消、checked 算术、嵌入者 seam）——建议**直接开 PR**，比 issue 更有说服力。
 4. 询问：Zig 0.18 迁移计划（若上游要迁，p1/p2/p3b/p3c 可贡献；目前上游仍 0.16）。

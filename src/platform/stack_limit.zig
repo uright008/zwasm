@@ -65,15 +65,21 @@ const build_options = @import("build_options");
 /// Windows commit boundary. If the probe still doesn't fire at
 /// 1 MiB, the bug is in the probe instruction stream execution
 /// itself (not stack-limit value).
-/// #495 (snooze fork): a *single* frame larger than the headroom steps over
-/// both the probe limit and the guard page in one `SUB RSP`, and the resulting
-/// stack fault is not a classified trap — the process exits with a fatal
-/// signal. Runaway recursion with small frames was the case the 16 KiB value
-/// was tuned for; real-world code (ed25519, deep spill regions) has frames
-/// well above it. The emitters additionally decline any function whose frame
-/// still exceeds this bound, so the two together are a bound rather than a
-/// guess. Keep this below the smallest host stack the CLI/tests use.
-pub const STACK_GUARD_HEADROOM: usize = 1024 * 1024;
+pub const STACK_GUARD_HEADROOM: usize = if (builtin.os.tag == .windows)
+    1024 * 1024
+else
+    16 * 1024;
+
+/// Largest frame an x86_64 JIT function may have without a prologue stack
+/// probe; the rule is at the probe in `x86_64/emit.zig` and in the ADR-0105
+/// amendment (#495). Fixed, not this build's headroom, because an AOT
+/// artifact runs under its target's: the assert keeps it at half of every
+/// OS's headroom, each checked in its own build.
+pub const LEAF_FRAME_MAX: usize = 8 * 1024;
+
+comptime {
+    std.debug.assert(2 * LEAF_FRAME_MAX <= STACK_GUARD_HEADROOM);
+}
 
 /// Interpreter native-recursion headroom (D-288 / ADR-0167). The
 /// interp recurses on the host stack per wasm call (`mvp.invoke`,
@@ -384,20 +390,9 @@ test "computeStackLimit: returns non-zero on supported hosts (Mac / Linux / Wind
     }
 }
 
-test "STACK_GUARD_HEADROOM: 1 MiB on every host (#495)" {
-    // ADR-0105 D6 started at 16 KiB for Mac/Linux and 1 MiB on Win64 (R3
-    // cycle 6). #495 showed the 16 KiB value only covers *cumulative* runaway
-    // recursion: a single frame larger than the headroom steps over both the
-    // probe and the guard page, and the stack fault is not a classified trap.
-    // Real code (ed25519, deep spill regions) has such frames, so the bound is
-    // now uniform; the emitters decline anything that still exceeds it.
-    try testing.expectEqual(@as(usize, 1024 * 1024), STACK_GUARD_HEADROOM);
-    // A headroom at or above the host stack would put the probe limit above
-    // the stack top and trap every call.
-    const high = nativeStackHigh();
-    if (high == 0) return; // platform without stack introspection
-    const low = computeStackLimit(STACK_GUARD_HEADROOM);
-    try testing.expect(low < high);
+test "STACK_GUARD_HEADROOM: 16 KiB per ADR-0105 D6 initial value (1 MiB on Win64 per R3 cycle 6)" {
+    const expected: usize = if (builtin.os.tag == .windows) 1024 * 1024 else 16 * 1024;
+    try testing.expectEqual(expected, STACK_GUARD_HEADROOM);
 }
 
 test "parseProcMapsStack: extracts the [stack] range (musl/non-glibc Linux fallback)" {
