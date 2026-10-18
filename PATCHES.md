@@ -15,7 +15,7 @@
 | --- | --- | --- | --- | --- |
 | p1 | `build: port build.zig to the Zig 0.18 std.Build API` | `standardOptimizeOption` 返回可选、`Optimize` 枚举字段改小写、`b.args` 移除、`b.pathFromRoot` → `addFileArg`/`addPrefixedFileArg`（47+5 处） | 上游仍要求 0.16 | 若上游迁 0.18 则整条删除；否则每次上游改动 build.zig 时手工 rebase |
 | p2 | `port: run the tree on Zig 0.18-dev` | 四类：`T ** N` → `@splat`/`++`；类型反射（`std.meta.fields`、`Type.Enum.fields`、`Type.Fn.params`）＋ 新增 `src/type_info_compat.zig`；`std.Io` 操作模型（`io.operate(.{ .net_read/.net_write })`）＋ 新增 `src/io_net_compat.zig`；杂项字面量/字段改名 | 同上 | 同上 |
-| p3 | `safety: guest faults trap instead of aborting the host (#519, #302 family)` | `mapDispatchErr` 的 `else` 由 `@panic` 改为 `error.HostTrap`；三个 mixed multi-result thunk 与 `invokeBufferWrite` 补 `ensureInstalled()` + `stack_limit`；新增回归 fixture 与测试 | **#519 / #302 仍 open** | 上游若修，删除对应部分；建议先把发现作为评论发到 issue（见下） |
+| p3 | `safety: guest faults trap instead of aborting the host (#519, #302 family)` | JIT 入口前置（arm handler + `stack_limit` + 清 latch）已按上游形状收进 `entry.beginJitEntry`，六个入口共用（2026-10-18 同步）；`mapDispatchErr` 的 `else` 已是 `isGuestFault` 窄化 + `HostTrap` 兜底；新增回归 fixture 与测试 | **#302 → 上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 待合**；**#519 已由上游 `f45dad90d` 修** | #563 合并后删除入口前置部分（本地已是同形状，rebase 时是纯删除）；`else` / `isGuestFault` 见末尾「注意」 |
 | p3b | `refactor: drop the reflection shim for the 0.18 idioms` | 删 `type_info_compat.zig`；用 `@typeInfo(E).@"enum".field_names` + `@field` 取代旧 `std.meta.fields` 视图 | 上游仍 0.16 | 随 p1/p2 一起上游化或删除 |
 | p3c | `refactor: use the 0.18 Io idioms for socket reads and writes` | 删 `io_net_compat.zig`；读用 `net.Stream.read(io, bufs)`，写用 `net.Stream.writer(io, buf)` + `writeAll` + `flush` | 同上 | 同上 |
 | p3d | `safety: attribute guest faults to the guest, not to the host binding` | `mapDispatchErr` 按 D-445 约定把 10 个 guest 致因错误窄化为 `error.Unreachable`（单一咽喉点，替代改 59 处调用点）；`HostTrap` 保留为兜底 | 与 #519 同类，可合并进该 issue 的评论 | 上游若实现自己的窄化，删除本条 |
@@ -94,7 +94,7 @@ fork 里积累（本表的候选不丢，随时可再发）。在 #563 有信号
 仍要发的：
 
 1. 评论 [#495](https://github.com/zwasm/zwasm/issues/495)：探针在 `SUB RSP` 之前、处理器不分类栈 fault；四个修法方向请上游选。
-2. 评论 [#302](https://github.com/zwasm/zwasm/issues/302)：生产路径 `entry_buffer_write.zig` 同样缺 `ensureInstalled`（本 fork 已修）。
+2. ~~评论 [#302](https://github.com/zwasm/zwasm/issues/302)~~ → 已改为 PR [#563](https://github.com/zwasm/zwasm/pull/563)（2026-10-17 提交，等维护者放行 CI）：三个 mixed thunk 与生产路径 `entry_buffer_write.zig` 一并修。
 3. 新 issue / PR：上表里标「新（无 issue）」的通用机制（中断、泛化取消、checked 算术、嵌入者 seam）——建议**直接开 PR**，比 issue 更有说服力。
 4. 询问：Zig 0.18 迁移计划（若上游要迁，p1/p2/p3b/p3c 可贡献；目前上游仍 0.16）。
 
@@ -190,6 +190,7 @@ aarch64-macos + wasm-tools 1.262.0，`~/zwork/fork` @ `4d5d4eb`）。**spec 语�
 
 ## 注意
 
+- **#302 入口前置已同上游形状**（2026-10-18）：本地改用 `entry.beginJitEntry`（arm handler + `stack_limit` + 清 latch，六个入口共用），与上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 完全一致 —— 合并后删掉这一半即可，**不需要按新形状重写**。
 - `test/component/invalid_pollable.{wat,wasm}` 是本 fork 新增的 fixture（合法组件 + `pollable.ready(999)`），上游没有。
 - 上游若改变 `mapDispatchErr` 的语义（例如新增 trap 种类），p3 需要按新形状重写，而不是简单保留。
 - 上游 HEAD 在本 fork 建立时只比基线多 1 个无关提交（`51634833f`）；2026-10-17 复查时领先 8 个提交，已 rebase（零冲突）。
