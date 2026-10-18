@@ -19,7 +19,7 @@ CI 在运行时解析 master，会和本机装的那个 dev 不一致——同�
 | --- | --- | --- | --- | --- |
 | p1 | `build: port build.zig to the Zig 0.18 std.Build API` | `standardOptimizeOption` 返回可选、`Optimize` 枚举字段改小写、`b.args` 移除、`b.pathFromRoot` → `addFileArg`/`addPrefixedFileArg`（47+5 处） | 上游仍要求 0.16 | 若上游迁 0.18 则整条删除；否则每次上游改动 build.zig 时手工 rebase |
 | p2 | `port: run the tree on Zig 0.18-dev` | 四类：`T ** N` → `@splat`/`++`；类型反射（`std.meta.fields`、`Type.Enum.fields`、`Type.Fn.params`）＋ 新增 `src/type_info_compat.zig`；`std.Io` 操作模型（`io.operate(.{ .net_read/.net_write })`）＋ 新增 `src/io_net_compat.zig`；杂项字面量/字段改名 | 同上 | 同上 |
-| p3 | `safety: guest faults trap instead of aborting the host (#519, #302 family)` | JIT 入口前置（arm handler + `stack_limit` + 清 latch）已按上游形状收进 `entry.beginJitEntry`，六个入口共用（2026-10-18 同步）；`mapDispatchErr` 的 `else` 已是 `isGuestFault` 窄化 + `HostTrap` 兜底；新增回归 fixture 与测试 | **#302 → 上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 待合**；**#519 已由上游 `f45dad90d` 修** | #563 合并后删除入口前置部分（本地已是同形状，rebase 时是纯删除）；`else` / `isGuestFault` 见末尾「注意」 |
+| p3 | `safety: guest faults trap instead of aborting the host (#519, #302 family)` | JIT 入口前置（arm handler + `stack_limit` + 清 latch）已按上游形状收进 `entry.beginJitEntry`，六个入口共用（2026-10-18 同步）；`mapDispatchErr` 的 `else` 已是 `isGuestFault` 窄化 + `HostTrap` 兜底；新增回归 fixture 与测试 | **#302 已合并：上游 `f609b1c35`**（PR [#563](https://github.com/zwasm/zwasm/pull/563)，2026-10-18）；**#519 已由上游 `f45dad90d` 修** | **下次同步上游 main 时删除本地副本**：`entry.zig` 的 `beginJitEntry` 定义 + 5 处调用（`invokeAndCheck`、`invokeAndCheckVoid`、三个 mixed thunk）、`entry_buffer_write.zig` 的调用；**保留 fork 的 0.18 idiom**（`[_]u64{0} ** n` → `@as([n]u64, @splat(0))`），`entry.zig` 的文档注释取上游的三行精简版；`else` / `isGuestFault` 见末尾「注意」 |
 | p3b | `refactor: drop the reflection shim for the 0.18 idioms` | 删 `type_info_compat.zig`；用 `@typeInfo(E).@"enum".field_names` + `@field` 取代旧 `std.meta.fields` 视图 | 上游仍 0.16 | 随 p1/p2 一起上游化或删除 |
 | p3c | `refactor: use the 0.18 Io idioms for socket reads and writes` | 删 `io_net_compat.zig`；读用 `net.Stream.read(io, bufs)`，写用 `net.Stream.writer(io, buf)` + `writeAll` + `flush` | 同上 | 同上 |
 | p3d | `safety: attribute guest faults to the guest, not to the host binding` | `mapDispatchErr` 按 D-445 约定把 10 个 guest 致因错误窄化为 `error.Unreachable`（单一咽喉点，替代改 59 处调用点）；`HostTrap` 保留为兜底 | 与 #519 同类，可合并进该 issue 的评论 | 上游若实现自己的窄化，删除本条 |
@@ -59,6 +59,8 @@ CI 在运行时解析 master，会和本机装的那个 dev 不一致——同�
 - **验证（本机，0.18-dev.210）**：`zig build` 通过；`zig build test` — 22/22 steps、
   3442/3454（12 skipped）、核心套件 3332 pass / 12 skip；8000-locals 大帧递归冒烟在
   jit 与 interp 均为 `trap kind=stack_overflow`（exit 1），不再是 exit 70。
+- **后续**：#302 的 PR [#563](https://github.com/zwasm/zwasm/pull/563) 于当日合并为上游 `f609b1c35`
+  （REBASE 队列，单提交原样落地；issue #302 同时关闭）—— 下次同步按 p3 的处置删除本地副本。
 
 ## 2026-10-17 review 修复
 
@@ -88,7 +90,7 @@ Zig 版本无关，重写量很小）。下表给出「载荷在哪」，重写�
 | --- | --- | --- | --- |
 | host fn 错误归一化 | `987bbfec8`（部分） | `zwasm/host_func_marshal.zig` 的 `hostFnError`；`zwasm/instance.zig` 的 `mapDispatchErr` | **#519 已由上游 `f45dad90d` 修** |
 | ~~大帧 JIT decline~~ | ~~`f8183217d`~~ | 已作废：上游 `373eceb02` 以另一形状修了 #495，本地已按上游取（2026-10-18 merge） | #495 **已修** |
-| thunk 武装 | `987bbfec8`（后半） | 三个 mixed multi-result thunk + `invokeBufferWrite` 的 `ensureInstalled()` + `stack_limit` | #302（open）→ **上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 已提交**（2026-10-17，按 0.16 重写；等维护者放行 CI）。**合并后删掉 fork 这一半** |
+| ~~thunk 武装~~ | ~~`987bbfec8`（后半）~~ | 已合并：上游 `f609b1c35`（PR [#563](https://github.com/zwasm/zwasm/pull/563)，2026-10-18，单提交原样落地）。本地副本待下次同步删除，只留 0.18 idiom | #302 **已修** |
 | 跨线程中断 | `4f8f79605` | `zwasm/instance.zig:interrupt`（上游已有）+ `api/component.zig` 的 `Opened.interrupt`/`ComponentInstance.interrupt` + `api/component_wasi_p2.zig` 的 `BuiltComponent.interrupt` | 新（无 issue） |
 | 泛化宿主 IO 取消 | `4f8f79605` | `wasi/host.zig` 的注册表（`registerHostCancel`/`unregisterHostCancel`/`cancelHostIo`）+ `component_wasi_p2_http.zig` 的注册调用点 | 新（无 issue） |
 | 时钟等待可中断 | `4f8f79605` | `component_wasi_ctx.zig:p2WaitDeadlineSync` 切片 + `Host.clocks_wait_max_ns` | 新（无 issue） |
@@ -132,7 +134,7 @@ fork 里积累（本表的候选不丢，随时可再发）。在 #563 有信号
 仍要发的：
 
 1. ~~评论 [#495](https://github.com/zwasm/zwasm/issues/495)~~ → 上游已自行修复（`373eceb02`：probe 计入帧），无需评论。
-2. ~~评论 [#302](https://github.com/zwasm/zwasm/issues/302)~~ → 已改为 PR [#563](https://github.com/zwasm/zwasm/pull/563)（2026-10-17 提交，等维护者放行 CI）：三个 mixed thunk 与生产路径 `entry_buffer_write.zig` 一并修。
+2. ~~评论 [#302](https://github.com/zwasm/zwasm/issues/302)~~ → PR [#563](https://github.com/zwasm/zwasm/pull/563) **已于 2026-10-18 合并为上游 `f609b1c35`**，issue #302 同时关闭。
 3. 新 issue / PR：上表里标「新（无 issue）」的通用机制（中断、泛化取消、checked 算术、嵌入者 seam）——建议**直接开 PR**，比 issue 更有说服力。
 4. 询问：Zig 0.18 迁移计划（若上游要迁，p1/p2/p3b/p3c 可贡献；目前上游仍 0.16）。
 
@@ -232,7 +234,7 @@ aarch64-macos + wasm-tools 1.262.0，`~/zwork/fork` @ `4d5d4eb`）。**spec 语�
 
 ## 注意
 
-- **#302 入口前置已同上游形状**（2026-10-18）：本地改用 `entry.beginJitEntry`（arm handler + `stack_limit` + 清 latch，六个入口共用），与上游 PR [#563](https://github.com/zwasm/zwasm/pull/563) 完全一致 —— 合并后删掉这一半即可，**不需要按新形状重写**。
+- **#302 已上游化**（上游 `f609b1c35`，2026-10-18 合并）：本地那份 `entry.beginJitEntry` 及其 6 处调用，**下次同步上游 main 时删除**；删除时**保留 0.18 idiom**（`entry_buffer_write.zig` 的 `@splat`），`entry.zig` 的注释取上游的三行精简版 —— 是纯删除，不需要按新形状重写。
 - `test/component/invalid_pollable.{wat,wasm}` 是本 fork 新增的 fixture（合法组件 + `pollable.ready(999)`），上游没有。
 - 上游若改变 `mapDispatchErr` 的语义（例如新增 trap 种类），p3 需要按新形状重写，而不是简单保留。
 - 上游 HEAD 在本 fork 建立时只比基线多 1 个无关提交（`51634833f`）；2026-10-17 复查时领先 8 个提交，已 rebase（零冲突）。
