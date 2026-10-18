@@ -131,17 +131,18 @@ fn endsInDotComponent(path: []const u8) bool {
     return finalComponentIs(path, .dot_only);
 }
 
-/// Which dotted spellings a caller must reject as a final component. `rmdir`
-/// needs only `.` — POSIX makes a trailing `..` EEXIST/ENOTEMPTY, which maps —
-/// while `rename` needs both, because POSIX makes either EINVAL.
-const DottedFinal = enum { dot_only, dot_or_dotdot };
+/// Which dotted spellings a caller must handle as a final component.
+/// `rmdir` answers `.inval` for `.` and `.notempty` for `..` (see the call
+/// site); `rename` must reject both, because POSIX makes either EINVAL.
+const DottedFinal = enum { dot_only, dotdot_only, dot_or_dotdot };
 
 fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
     var last: []const u8 = &.{};
     var it = std.mem.tokenizeAny(u8, path, separators);
     while (it.next()) |seg| last = seg;
-    if (std.mem.eql(u8, last, ".")) return true;
-    return which == .dot_or_dotdot and std.mem.eql(u8, last, "..");
+    if (std.mem.eql(u8, last, ".")) return which != .dotdot_only;
+    if (std.mem.eql(u8, last, "..")) return which != .dot_only;
+    return false;
 }
 
 /// The errno POSIX gives `unlink` for a guest path written with a trailing
@@ -240,6 +241,13 @@ pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
     // rmdir on a path whose last component is `.` is EINVAL per POSIX; guarded
     // because std.Io panics on that errno in debug builds (see the helper).
     if (endsInDotComponent(r.sub)) return .inval;
+    // A trailing `..` resolves to a directory that necessarily contains the
+    // component it came from, so the removal can never succeed: Linux answers
+    // ENOTEMPTY, macOS answers EINVAL (measured: `rmdir("a/..")` → EINVAL 22,
+    // which `std.Io` turns into a debug panic and this fork would have mapped
+    // to `.io`). Answering lexically gives every guest the same errno on every
+    // host, and never reaches the syscall that disagrees.
+    if (finalComponentIs(r.sub, .dotdot_only)) return .notempty;
     r.dir.deleteDir(io, r.sub) catch |err| return mapDirErr(err);
     return .success;
 }
@@ -801,8 +809,10 @@ test "path_remove_directory: every spelling of a trailing `.` is inval, not a ho
         @memcpy(mem[0..p.len], p);
         try testing.expectEqual(p1.Errno.inval, pathRemoveDirectory(&h, &mem, dirfd, 0, @intCast(p.len)));
     }
-    // A trailing `..` is NOT this case: the host answers notempty, which maps
-    // cleanly, so it must still reach it.
+    // A trailing `..` is a different answer: the path resolves to a directory
+    // that contains the component it came from, so removal can never succeed.
+    // Answered lexically as notempty (Linux's ENOTEMPTY; macOS would say EINVAL)
+    // rather than reaching a syscall that disagrees per host.
     @memset(mem[0..32], 0);
     @memcpy(mem[0..4], "a/..");
     try testing.expectEqual(p1.Errno.notempty, pathRemoveDirectory(&h, &mem, dirfd, 0, 4));
