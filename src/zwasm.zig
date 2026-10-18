@@ -424,6 +424,7 @@ test {
     _ = @import("wasi/proc.zig");
     _ = @import("wasi/fd.zig");
     _ = @import("wasi/path.zig");
+    _ = @import("wasi/path_walk.zig"); // fork-only: kernel-enforced containment (p10)
     _ = @import("wasi/clocks.zig");
     _ = @import("wasi/jit_dispatch.zig");
     _ = @import("wasi/adapter.zig");
