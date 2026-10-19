@@ -16,7 +16,10 @@ pub fn build(b: *std.Build) void {
     // red on a tree that was green locally.
     const optimize_opt = b.standardOptimizeOption(.{});
     const optimize = if (@typeInfo(@TypeOf(optimize_opt)) == .optional)
-        optimize_opt orelse .Debug
+        // Lowercase: the field was named `debug` in every 0.18 dev build; the
+        // capitalised spelling never compiled anywhere, it was merely in the
+        // branch that a non-optional return makes dead.
+        optimize_opt orelse .debug
     else
         optimize_opt;
 
